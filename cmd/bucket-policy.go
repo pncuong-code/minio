@@ -146,9 +146,13 @@ func getConditionValues(r *http.Request, lc string, cred auth.Credentials) map[s
 	}
 
 	cloneHeader := r.Header.Clone()
-	if v := cloneHeader.Get("x-amz-signature-age"); v != "" {
-		args["signatureAge"] = []string{v}
-		cloneHeader.Del("x-amz-signature-age")
+	signatureAge := cloneHeader.Get(xhttp.AmzSignatureAge)
+	cloneHeader.Del(xhttp.AmzSignatureAge)
+	// The presigned V4 verifier overwrites this internal scratch header after
+	// validating the signature. Ignore a value supplied on every other request
+	// type, where it would otherwise synthesize s3:signatureAge.
+	if authType == authTypePresigned && signatureAge != "" {
+		args["signatureAge"] = []string{signatureAge}
 	}
 
 	if userTags := cloneHeader.Get(xhttp.AmzObjectTagging); userTags != "" {
