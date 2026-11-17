@@ -117,3 +117,84 @@ func TestANBMSensitiveEnvRedaction(t *testing.T) {
 		}
 	}
 }
+
+// ANBM-002 (XFF): forwarding headers from untrusted peers must not override aws:SourceIp.
+func TestANBMUntrustedXFFIgnoredInSourceIP(t *testing.T) {
+	pol := `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:GetObject"],` +
+		`"Resource":["arn:aws:s3:::b/*"],"Condition":{"IpAddress":{"aws:SourceIp":"10.9.9.0/24"}}}]}`
+	p, err := policy.ParseConfig(strings.NewReader(pol))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := httptest.NewRequest(http.MethodGet, "http://x/b/o", nil)
+	r.RemoteAddr = "203.0.113.5:1234"
+	r.Header.Set("X-Forwarded-For", "10.9.9.9")
+	r.Header.Set("X-Real-IP", "10.9.9.9")
+	if p.IsAllowed(policy.Args{
+		AccountName: "u", Action: policy.GetObjectAction, BucketName: "b", ObjectName: "o",
+		ConditionValues: getConditionValues(r, "", auth.Credentials{AccessKey: "u"}),
+	}) {
+		t.Fatal("ANBM-002: X-Forwarded-For from untrusted peer bypassed aws:SourceIp")
+	}
+}
+
+// ANBM-003 (DefaultCredentials): non-CI startup must reject empty/default root credentials.
+func TestANBMRefuseDefaultCredentialsOutsideCI(t *testing.T) {
+	if _, err := resolveRootCredentials(auth.Credentials{}, false); err == nil {
+		t.Fatal("ANBM-003: expected error when root credentials are missing outside CI")
+	}
+	cred, err := resolveRootCredentials(auth.Credentials{}, true)
+	if err != nil || !cred.Equal(auth.DefaultCredentials) {
+		t.Fatalf("expected DefaultCredentials in CI mode, got %+v, err=%v", cred, err)
+	}
+}
+
+// ANBM-004 (CORS): wildcard '*' origin config must not advertise Allow-Credentials: true.
+func TestANBMCORSWildcardDisablesCredentials(t *testing.T) {
+	setCORS := func(origins []string) {
+		globalAPIConfig.mu.Lock()
+		globalAPIConfig.corsAllowOrigins = origins
+		globalAPIConfig.mu.Unlock()
+	}
+
+	globalAPIConfig.mu.RLock()
+	orig := globalAPIConfig.corsAllowOrigins
+	globalAPIConfig.mu.RUnlock()
+	defer setCORS(orig)
+
+	h := corsHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	setCORS([]string{"*"})
+	req := httptest.NewRequest(http.MethodGet, "http://x/", nil)
+	req.Header.Set("Origin", "https://evil.example")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if got := rec.Header().Get("Access-Control-Allow-Credentials"); got != "" {
+		t.Fatalf("ANBM-004: wildcard CORS must not set Allow-Credentials, got %q", got)
+	}
+
+	setCORS([]string{"https://console.example.com"})
+	req2 := httptest.NewRequest(http.MethodGet, "http://x/", nil)
+	req2.Header.Set("Origin", "https://console.example.com")
+	rec2 := httptest.NewRecorder()
+	h.ServeHTTP(rec2, req2)
+	if got := rec2.Header().Get("Access-Control-Allow-Credentials"); got != "true" {
+		t.Fatalf("expected Allow-Credentials=true for explicit origin, got %q", got)
+	}
+}
+
+// ANBM-001 (SiteReplicationNetPerf/DevNull): unauthenticated requests must be rejected.
+func TestANBMSiteReplicationPerfRequiresAuth(t *testing.T) {
+	api := adminAPIHandlers{}
+	for _, fn := range []http.HandlerFunc{api.SiteReplicationDevNull, api.SiteReplicationNetPerf} {
+		req := httptest.NewRequest(http.MethodPost, "http://x/minio/admin/v3/site-replication/netperf", nil)
+		req = req.WithContext(newContext(req, httptest.NewRecorder(), "test"))
+		rec := httptest.NewRecorder()
+		fn(rec, req)
+		if rec.Code == http.StatusOK || rec.Code == http.StatusNoContent {
+			t.Fatalf("ANBM-001: unauthenticated site-replication perf request was not rejected (status %d)", rec.Code)
+		}
+	}
+}

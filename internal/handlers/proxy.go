@@ -24,6 +24,7 @@ package handlers
 import (
 	"net"
 	"net/http"
+	"net/netip"
 	"regexp"
 	"strings"
 
@@ -57,6 +58,72 @@ var (
 // Used to disable all processing of the X-Forwarded-For header in source IP discovery.
 var enableXFFHeader = env.Get("_MINIO_API_XFF_HEADER", config.EnableOn) == config.EnableOn
 
+// trustedProxies restricts forwarding header trust to configured proxy IPs/CIDRs.
+// Empty by default so direct clients cannot spoof aws:SourceIp or rate-limit keys.
+var trustedProxies = parseTrustedProxies(env.Get("MINIO_API_TRUSTED_PROXIES", env.Get("_MINIO_API_TRUSTED_PROXIES", "")))
+
+func parseTrustedProxies(spec string) []netip.Prefix {
+	if strings.TrimSpace(spec) == "" {
+		return nil
+	}
+	var prefixes []netip.Prefix
+	for entry := range strings.SplitSeq(spec, ",") {
+		s := strings.TrimSpace(entry)
+		if s == "" {
+			continue
+		}
+		if p, err := netip.ParsePrefix(s); err == nil {
+			prefixes = append(prefixes, p)
+			continue
+		}
+		if addr, err := netip.ParseAddr(s); err == nil {
+			prefixes = append(prefixes, netip.PrefixFrom(addr.Unmap(), addr.Unmap().BitLen()))
+		}
+	}
+	return prefixes
+}
+
+func isTrustedProxy(remoteAddr string) bool {
+	if len(trustedProxies) == 0 || remoteAddr == "" {
+		return false
+	}
+	host := remoteAddr
+	if h, _, err := net.SplitHostPort(remoteAddr); err == nil {
+		host = h
+	}
+	host = strings.Trim(host, "[]")
+	addr, err := netip.ParseAddr(host)
+	if err != nil {
+		return false
+	}
+	addr = addr.Unmap()
+	for _, p := range trustedProxies {
+		if p.Contains(addr) {
+			return true
+		}
+	}
+	return false
+}
+
+func isIPInTrustedProxies(raw string) bool {
+	host := strings.Trim(strings.TrimSpace(raw), `"[]`)
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	host = strings.Trim(host, "[]")
+	addr, err := netip.ParseAddr(host)
+	if err != nil {
+		return false
+	}
+	addr = addr.Unmap()
+	for _, p := range trustedProxies {
+		if p.Contains(addr) {
+			return true
+		}
+	}
+	return false
+}
+
 // GetSourceScheme retrieves the scheme from the X-Forwarded-Proto and RFC7239
 // Forwarded headers (in that order).
 func GetSourceScheme(r *http.Request) string {
@@ -64,17 +131,10 @@ func GetSourceScheme(r *http.Request) string {
 
 	// Retrieve the scheme from X-Forwarded-Proto.
 	if proto := r.Header.Get(xForwardedProto); proto != "" {
-		scheme = strings.ToLower(proto)
+		scheme = strings.ToLower(strings.TrimSpace(proto))
 	} else if proto = r.Header.Get(xForwardedScheme); proto != "" {
-		scheme = strings.ToLower(proto)
+		scheme = strings.ToLower(strings.TrimSpace(proto))
 	} else if proto := r.Header.Get(forwarded); proto != "" {
-		// match should contain at least two elements if the protocol was
-		// specified in the Forwarded header. The first element will always be
-		// the 'for=', which we ignore, subsequently we proceed to look for
-		// 'proto=' which should precede right after `for=` if not
-		// we simply ignore the values and return empty. This is in line
-		// with the approach we took for returning first ip from multiple
-		// params.
 		if match := forRegex.FindStringSubmatch(proto); len(match) > 1 {
 			if match = protoRegex.FindStringSubmatch(match[2]); len(match) > 1 {
 				scheme = strings.ToLower(match[2])
@@ -82,24 +142,36 @@ func GetSourceScheme(r *http.Request) string {
 		}
 	}
 
+	if scheme != "http" && scheme != "https" {
+		return ""
+	}
 	return scheme
 }
 
 // GetSourceIPFromHeaders retrieves the IP from the X-Forwarded-For, X-Real-IP
-// and RFC7239 Forwarded headers (in that order)
+// and RFC7239 Forwarded headers (in that order) only when r.RemoteAddr is a trusted proxy.
 func GetSourceIPFromHeaders(r *http.Request) string {
+	if !isTrustedProxy(r.RemoteAddr) {
+		return ""
+	}
 	var addr string
 
 	if enableXFFHeader {
 		if fwd := r.Header.Get(xForwardedFor); fwd != "" {
-			// Only grab the first (client) address. Note that '192.168.0.1,
-			// 10.1.1.1' is a valid key for X-Forwarded-For where addresses after
-			// the first may represent forwarding proxies earlier in the chain.
-			s := strings.Index(fwd, ", ")
-			if s == -1 {
-				s = len(fwd)
+			// Walk right-to-left and pick the first IP not in trustedProxies
+			// so a client cannot spoof an earlier hop in X-Forwarded-For.
+			parts := strings.Split(fwd, ",")
+			for i := len(parts) - 1; i >= 0; i-- {
+				candidate := strings.TrimSpace(parts[i])
+				if candidate == "" {
+					continue
+				}
+				if !isIPInTrustedProxies(candidate) {
+					addr = candidate
+					break
+				}
+				addr = candidate
 			}
-			addr = fwd[:s]
 		}
 	}
 
@@ -107,13 +179,8 @@ func GetSourceIPFromHeaders(r *http.Request) string {
 		if fwd := r.Header.Get(xRealIP); fwd != "" {
 			// X-Real-IP should only contain one IP address (the client making the
 			// request).
-			addr = fwd
+			addr = strings.TrimSpace(fwd)
 		} else if fwd := r.Header.Get(forwarded); fwd != "" {
-			// match should contain at least two elements if the protocol was
-			// specified in the Forwarded header. The first element will always be
-			// the 'for=' capture, which we ignore. In the case of multiple IP
-			// addresses (for=8.8.8.8, 8.8.4.4, 172.16.1.20 is valid) we only
-			// extract the first, which should be the client IP.
 			if match := forRegex.FindStringSubmatch(fwd); len(match) > 1 {
 				// IPv6 addresses in Forwarded headers are quoted-strings. We strip
 				// these quotes.

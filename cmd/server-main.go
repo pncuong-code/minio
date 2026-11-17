@@ -742,6 +742,16 @@ func initializeLogRotate(ctx *cli.Context) (io.WriteCloser, error) {
 	return output, nil
 }
 
+func resolveRootCredentials(cred auth.Credentials, isCICD bool) (auth.Credentials, error) {
+	if cred.IsValid() {
+		return cred, nil
+	}
+	if !isCICD {
+		return auth.Credentials{}, errors.New("MINIO_ROOT_USER and MINIO_ROOT_PASSWORD must be configured")
+	}
+	return auth.DefaultCredentials, nil
+}
+
 // serverMain handler called for 'minio server' command.
 func serverMain(ctx *cli.Context) {
 	r := rand.New(rand.NewSource(time.Now().UnixNano()))
@@ -815,11 +825,10 @@ func serverMain(ctx *cli.Context) {
 			cred = autoGenerateRootCredentials()
 		}
 
-		if !cred.IsValid() {
-			cred = auth.DefaultCredentials
+		cred, err := resolveRootCredentials(cred, globalIsCICD)
+		if err != nil {
+			logger.Fatal(err, "Refusing to start server with default credentials")
 		}
-
-		var err error
 		globalNodeAuthToken, err = authenticateNode(cred.AccessKey, cred.SecretKey)
 		if err != nil {
 			logger.Fatal(err, "Unable to generate internode credentials")

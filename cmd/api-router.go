@@ -20,6 +20,7 @@ package cmd
 import (
 	"net"
 	"net/http"
+	"slices"
 
 	consoleapi "github.com/minio/console/api"
 	xhttp "github.com/minio/minio/internal/http"
@@ -671,7 +672,7 @@ func corsHandler(handler http.Handler) http.Handler {
 		"x-amz*",
 		"*",
 	}
-	opts := cors.Options{
+	baseOpts := cors.Options{
 		AllowOriginFunc: func(origin string) bool {
 			for _, allowedOrigin := range globalAPIConfig.getCorsAllowOrigins() {
 				if wildcard.MatchSimple(allowedOrigin, origin) {
@@ -689,9 +690,23 @@ func corsHandler(handler http.Handler) http.Handler {
 			http.MethodOptions,
 			http.MethodPatch,
 		},
-		AllowedHeaders:   commonS3Headers,
-		ExposedHeaders:   commonS3Headers,
-		AllowCredentials: true,
+		AllowedHeaders: commonS3Headers,
+		ExposedHeaders: commonS3Headers,
 	}
-	return cors.New(opts).Handler(handler)
+
+	wildcardOpts := baseOpts
+	wildcardOpts.AllowCredentials = false
+	wildcardHandler := cors.New(wildcardOpts).Handler(handler)
+
+	explicitOpts := baseOpts
+	explicitOpts.AllowCredentials = true
+	explicitHandler := cors.New(explicitOpts).Handler(handler)
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if slices.Contains(globalAPIConfig.getCorsAllowOrigins(), "*") {
+			wildcardHandler.ServeHTTP(w, r)
+			return
+		}
+		explicitHandler.ServeHTTP(w, r)
+	})
 }

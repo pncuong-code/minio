@@ -267,7 +267,6 @@ func (s *TestSuiteCommon) TestBucketSQSNotificationWebHook(c *check) {
 
 func (s *TestSuiteCommon) TestCors(c *check) {
 	expectedMap := http.Header{}
-	expectedMap.Set("Access-Control-Allow-Credentials", "true")
 	expectedMap.Set("Access-Control-Allow-Origin", "http://foobar.com")
 	expectedMap["Access-Control-Expose-Headers"] = []string{
 		"Date",
@@ -299,6 +298,9 @@ func (s *TestSuiteCommon) TestCors(c *check) {
 		c.Fatal(err)
 	}
 
+	if got := res.Header.Get("Access-Control-Allow-Credentials"); got != "" {
+		c.Errorf("Expected Access-Control-Allow-Credentials to be omitted on wildcard CORS, got %q", got)
+	}
 	for k := range expectedMap {
 		if v, ok := res.Header[k]; !ok {
 			c.Errorf("Expected key %s missing from %v", k, res.Header)
