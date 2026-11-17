@@ -49,7 +49,8 @@ var (
 	forwarded = http.CanonicalHeaderKey("Forwarded")
 	// Allows for a sub-match of the first value after 'for=' to the next
 	// comma, semi-colon or space. The match is case-insensitive.
-	forRegex = regexp.MustCompile(`(?i)(?:for=)([^(;|,| )]+)(.*)`)
+	forRegex     = regexp.MustCompile(`(?i)(?:for=)([^(;|,| )]+)(.*)`)
+	forItemRegex = regexp.MustCompile(`(?i)for=([^;, ]+)`)
 	// Allows for a sub-match for the first instance of scheme (http|https)
 	// prefixed by 'proto='. The match is case-insensitive.
 	protoRegex = regexp.MustCompile(`(?i)^(;|,| )+(?:proto=)(https|http)`)
@@ -157,9 +158,11 @@ func GetSourceIPFromHeaders(r *http.Request) string {
 	var addr string
 
 	if enableXFFHeader {
-		if fwd := r.Header.Get(xForwardedFor); fwd != "" {
-			// Walk right-to-left and pick the first IP not in trustedProxies
-			// so a client cannot spoof an earlier hop in X-Forwarded-For.
+		if xffVals := r.Header.Values(xForwardedFor); len(xffVals) > 0 {
+			// Join all X-Forwarded-For header lines before walking right-to-left:
+			// proxies that append a second header line instead of coalescing put
+			// the trusted hop in the last header, while r.Header.Get reads only [0].
+			fwd := strings.Join(xffVals, ",")
 			parts := strings.Split(fwd, ",")
 			for i := len(parts) - 1; i >= 0; i-- {
 				candidate := strings.TrimSpace(parts[i])
@@ -180,11 +183,19 @@ func GetSourceIPFromHeaders(r *http.Request) string {
 			// X-Real-IP should only contain one IP address (the client making the
 			// request).
 			addr = strings.TrimSpace(fwd)
-		} else if fwd := r.Header.Get(forwarded); fwd != "" {
-			if match := forRegex.FindStringSubmatch(fwd); len(match) > 1 {
-				// IPv6 addresses in Forwarded headers are quoted-strings. We strip
-				// these quotes.
-				addr = strings.Trim(match[1], `"`)
+		} else if fwdVals := r.Header.Values(forwarded); len(fwdVals) > 0 {
+			fwd := strings.Join(fwdVals, ", ")
+			matches := forItemRegex.FindAllStringSubmatch(fwd, -1)
+			for i := len(matches) - 1; i >= 0; i-- {
+				candidate := strings.Trim(strings.TrimSpace(matches[i][1]), `"`)
+				if candidate == "" {
+					continue
+				}
+				if !isIPInTrustedProxies(candidate) {
+					addr = candidate
+					break
+				}
+				addr = candidate
 			}
 		}
 	}

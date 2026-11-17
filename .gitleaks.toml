@@ -1,0 +1,14 @@
+title = "MinIO Gitleaks Configuration"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Ignore test fixtures, unit tests, documentation examples, and CI test keys"
+paths = [
+  '''.*_test\.go$''',
+  '''(^|/)testdata/''',
+  '''^docs/''',
+  '''^\.github/''',
+  '''^internal/config/lambda/event/event\.go$''',
+]

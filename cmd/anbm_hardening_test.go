@@ -207,13 +207,15 @@ func TestANBMCORSWildcardDisablesCredentials(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	setCORS([]string{"*"})
-	req := httptest.NewRequest(http.MethodGet, "http://x/", nil)
-	req.Header.Set("Origin", "https://evil.example")
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	if got := rec.Header().Get("Access-Control-Allow-Credentials"); got != "" {
-		t.Fatalf("ANBM-004: wildcard CORS must not set Allow-Credentials, got %q", got)
+	for _, wc := range [][]string{{"*"}, {"https://*"}, {"http://*"}} {
+		setCORS(wc)
+		req := httptest.NewRequest(http.MethodGet, "http://x/", nil)
+		req.Header.Set("Origin", "https://evil.example")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if got := rec.Header().Get("Access-Control-Allow-Credentials"); got != "" {
+			t.Fatalf("ANBM-004: wildcard CORS %v must not set Allow-Credentials, got %q", wc, got)
+		}
 	}
 
 	setCORS([]string{"https://console.example.com"})

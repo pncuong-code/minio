@@ -21,6 +21,7 @@ import (
 	"net"
 	"net/http"
 	"slices"
+	"strings"
 
 	consoleapi "github.com/minio/console/api"
 	xhttp "github.com/minio/minio/internal/http"
@@ -703,10 +704,19 @@ func corsHandler(handler http.Handler) http.Handler {
 	explicitHandler := cors.New(explicitOpts).Handler(handler)
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if slices.Contains(globalAPIConfig.getCorsAllowOrigins(), "*") {
+		if slices.ContainsFunc(globalAPIConfig.getCorsAllowOrigins(), isWildcardCORSOrigin) {
 			wildcardHandler.ServeHTTP(w, r)
 			return
 		}
 		explicitHandler.ServeHTTP(w, r)
 	})
+}
+
+func isWildcardCORSOrigin(origin string) bool {
+	switch strings.ToLower(strings.TrimSpace(origin)) {
+	case "*", "http://*", "https://*":
+		return true
+	default:
+		return false
+	}
 }
