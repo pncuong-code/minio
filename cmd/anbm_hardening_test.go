@@ -116,6 +116,47 @@ func TestANBMSensitiveEnvRedaction(t *testing.T) {
 			t.Fatalf("ANBM-012: %q should not be redacted", k)
 		}
 	}
+	// A plain *_URL suffix must NOT be treated as secret: these are non-secret
+	// endpoints that monitoring / support bundles need.
+	for _, k := range []string{
+		"MINIO_SERVER_URL", "MINIO_BROWSER_REDIRECT_URL",
+		"MINIO_IDENTITY_OPENID_CONFIG_URL", "MINIO_PROMETHEUS_URL",
+	} {
+		if isSensitiveEnvKey(k) {
+			t.Fatalf("ANBM-012: non-secret %q should not be redacted", k)
+		}
+	}
+}
+
+// ANBM-006: trace query redaction must mask STS bearer tokens and presigned
+// SigV4 material (which live in RawQuery on the Queries()-matched routes),
+// while leaving ordinary request parameters intact.
+func TestANBMTraceQueryRedaction(t *testing.T) {
+	secret := []string{
+		"WebIdentityToken=eyJhbGciOi.header.sig",
+		"Token=super-secret-grant",
+		"X-Amz-Security-Token=FwoGZXIvYXdz",
+		"X-Amz-Signature=deadbeefcafe",
+		"X-Amz-Credential=AKIA/20260101/us-east-1/s3/aws4_request",
+	}
+	for _, q := range secret {
+		got := redactTraceQuery(q)
+		if strings.Contains(got, "secret") || strings.Contains(got, "eyJhbGciOi") ||
+			strings.Contains(got, "FwoGZXIvYXdz") || strings.Contains(got, "deadbeefcafe") ||
+			strings.Contains(got, "AKIA") {
+			t.Fatalf("ANBM-006: query credential leaked through trace: %q -> %q", q, got)
+		}
+		if !strings.Contains(got, "*REDACTED*") {
+			t.Fatalf("ANBM-006: expected redaction marker for %q, got %q", q, got)
+		}
+	}
+	// A param merely ending in "Token" must not be mangled, and normal params
+	// are preserved.
+	got := redactTraceQuery("Action=AssumeRole&prefix=photos/2026&MyToken=keepme")
+	if !strings.Contains(got, "Action=AssumeRole") || !strings.Contains(got, "prefix=photos/2026") ||
+		!strings.Contains(got, "MyToken=keepme") {
+		t.Fatalf("ANBM-006: ordinary params altered: %q", got)
+	}
 }
 
 // ANBM-002 (XFF): forwarding headers from untrusted peers must not override aws:SourceIp.

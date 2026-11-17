@@ -48,7 +48,11 @@ func isSensitiveEnvKey(key string) bool {
 		}
 	}
 	// Keep the original "ends in key" rule (covers *_ACCESS_KEY, *_SECRET_KEY).
-	return strings.HasSuffix(k, "key") || strings.HasSuffix(k, "_url")
+	// Do NOT redact on a plain "_url" suffix: MINIO_SERVER_URL,
+	// MINIO_BROWSER_REDIRECT_URL, MINIO_IDENTITY_OPENID_CONFIG_URL and the like
+	// are non-secret endpoints that monitoring / support bundles need. Secret
+	// URLs are already caught above by connection_string / dsn.
+	return strings.HasSuffix(k, "key")
 }
 
 func getLocalServerProperty(endpointServerPools EndpointServerPools, r *http.Request, metrics bool) madmin.ServerProperties {

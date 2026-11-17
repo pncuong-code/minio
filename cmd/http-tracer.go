@@ -45,6 +45,22 @@ func redactLDAPPwd(s string) string {
 	return s
 }
 
+// traceQueryCredRegex matches credential-bearing query parameters: STS bearer
+// tokens (WebIdentityToken for AssumeRoleWithWebIdentity, Token for
+// ClientGrants/CustomToken) and presigned SigV4 material. The (^|&) anchor
+// keeps it from matching these names as substrings of unrelated params.
+var traceQueryCredRegex = regexp.MustCompile(`(?i)(^|&)((?:WebIdentityToken|Token|X-Amz-Security-Token|X-Amz-Signature|X-Amz-Credential)=)[^&]*`)
+
+// redactTraceQuery masks credentials carried in a raw query string before the
+// request line reaches a trace subscriber. ANBM-006: switching the STS routes
+// to httpTraceHdrs stops body tracing, but those routes are Queries()-matched,
+// so the bearer token still sits in RawQuery; a diagnostics-policy subscriber
+// could otherwise read and replay it. Also covers presigned S3 signatures.
+func redactTraceQuery(rawQuery string) string {
+	rawQuery = redactLDAPPwd(rawQuery)
+	return traceQueryCredRegex.ReplaceAllString(rawQuery, "$1$2*REDACTED*")
+}
+
 // sensitiveTraceHeaders are request headers that carry credentials or key
 // material and must never reach the trace stream in the clear (ANBM-006).
 var sensitiveTraceHeaders = []string{
@@ -171,7 +187,7 @@ func httpTracerMiddleware(h http.Handler) http.Handler {
 					Time:     reqStartTime,
 					Proto:    r.Proto,
 					Method:   r.Method,
-					RawQuery: redactLDAPPwd(r.URL.RawQuery),
+					RawQuery: redactTraceQuery(r.URL.RawQuery),
 					Client:   handlers.GetSourceIP(r),
 					Headers:  reqHeaders,
 					Path:     reqPath,
