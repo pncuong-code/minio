@@ -162,41 +162,41 @@ func registerSTSRouter(router *mux.Router) {
 		authOk := wildcard.MatchSimple(signV4Algorithm+"*", r.Header.Get(xhttp.Authorization))
 		noQueries := len(r.URL.RawQuery) == 0
 		return ctypeOk && authOk && noQueries
-	}).HandlerFunc(httpTraceAll(sts.AssumeRole))
+	}).HandlerFunc(httpTraceHdrs(sts.AssumeRole))
 
 	// Assume roles with JWT handler, handles both ClientGrants and WebIdentity.
 	stsRouter.Methods(http.MethodPost).MatcherFunc(func(r *http.Request, rm *mux.RouteMatch) bool {
 		ctypeOk := wildcard.MatchSimple("application/x-www-form-urlencoded*", r.Header.Get(xhttp.ContentType))
 		noQueries := len(r.URL.RawQuery) == 0
 		return ctypeOk && noQueries
-	}).HandlerFunc(httpTraceAll(sts.AssumeRoleWithSSO))
+	}).HandlerFunc(httpTraceHdrs(sts.AssumeRoleWithSSO))
 
 	// AssumeRoleWithClientGrants
-	stsRouter.Methods(http.MethodPost).HandlerFunc(httpTraceAll(sts.AssumeRoleWithClientGrants)).
+	stsRouter.Methods(http.MethodPost).HandlerFunc(httpTraceHdrs(sts.AssumeRoleWithClientGrants)).
 		Queries(stsAction, clientGrants).
 		Queries(stsVersion, stsAPIVersion).
 		Queries(stsToken, "{Token:.*}")
 
 	// AssumeRoleWithWebIdentity
-	stsRouter.Methods(http.MethodPost).HandlerFunc(httpTraceAll(sts.AssumeRoleWithWebIdentity)).
+	stsRouter.Methods(http.MethodPost).HandlerFunc(httpTraceHdrs(sts.AssumeRoleWithWebIdentity)).
 		Queries(stsAction, webIdentity).
 		Queries(stsVersion, stsAPIVersion).
 		Queries(stsWebIdentityToken, "{Token:.*}")
 
 	// AssumeRoleWithLDAPIdentity
-	stsRouter.Methods(http.MethodPost).HandlerFunc(httpTraceAll(sts.AssumeRoleWithLDAPIdentity)).
+	stsRouter.Methods(http.MethodPost).HandlerFunc(httpTraceHdrs(sts.AssumeRoleWithLDAPIdentity)).
 		Queries(stsAction, ldapIdentity).
 		Queries(stsVersion, stsAPIVersion).
 		Queries(stsLDAPUsername, "{LDAPUsername:.*}").
 		Queries(stsLDAPPassword, "{LDAPPassword:.*}")
 
 	// AssumeRoleWithCertificate
-	stsRouter.Methods(http.MethodPost).HandlerFunc(httpTraceAll(sts.AssumeRoleWithCertificate)).
+	stsRouter.Methods(http.MethodPost).HandlerFunc(httpTraceHdrs(sts.AssumeRoleWithCertificate)).
 		Queries(stsAction, clientCertificate).
 		Queries(stsVersion, stsAPIVersion)
 
 	// AssumeRoleWithCustomToken
-	stsRouter.Methods(http.MethodPost).HandlerFunc(httpTraceAll(sts.AssumeRoleWithCustomToken)).
+	stsRouter.Methods(http.MethodPost).HandlerFunc(httpTraceHdrs(sts.AssumeRoleWithCustomToken)).
 		Queries(stsAction, customTokenIdentity).
 		Queries(stsVersion, stsAPIVersion)
 }

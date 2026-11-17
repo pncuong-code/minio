@@ -180,8 +180,25 @@ func getConditionValues(r *http.Request, lc string, cred auth.Credentials) map[s
 		cloneHeader.Del(objLock)
 	}
 
+	// ANBM-001: every key already in `args` at this point is server-derived and
+	// trusted (SourceIp, SecureTransport, CurrentTime, principaltype, userid,
+	// username, ExistingObjectTag/*, ...). The policy library resolves a
+	// condition key by its canonical-header spelling first, so a client header
+	// or query value under the same (case-folded) name would otherwise shadow
+	// the trusted value and let the caller forge the condition. Freeze the
+	// trusted names and refuse to merge any client key that collides with one.
+	reservedConditionKeys := make(map[string]struct{}, len(args)+1)
+	for k := range args {
+		reservedConditionKeys[strings.ToLower(k)] = struct{}{}
+	}
+	// `groups` is written after these loops only when absent, so protect it too.
+	reservedConditionKeys["groups"] = struct{}{}
+
 	for key, values := range cloneHeader {
 		if strings.EqualFold(key, xhttp.AmzObjectTagging) {
+			continue
+		}
+		if _, reserved := reservedConditionKeys[strings.ToLower(key)]; reserved {
 			continue
 		}
 		if existingValues, found := args[key]; found {
@@ -206,6 +223,9 @@ func getConditionValues(r *http.Request, lc string, cred auth.Credentials) map[s
 	}
 
 	for key, values := range cloneURLValues {
+		if _, reserved := reservedConditionKeys[strings.ToLower(key)]; reserved {
+			continue
+		}
 		if existingValues, found := args[key]; found {
 			args[key] = append(existingValues, values...)
 		} else {

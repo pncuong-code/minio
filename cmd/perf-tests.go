@@ -362,6 +362,12 @@ func siteNetperf(ctx context.Context, duration time.Duration) madmin.SiteNetPerf
 		return madmin.SiteNetPerfNodeResult{Error: err.Error()}
 	}
 
+	// ANBM-007: with site replication disabled the peer list is empty and the
+	// division below panics. Fail closed instead of crashing the node.
+	if len(clusterInfos.Sites) == 0 {
+		return madmin.SiteNetPerfNodeResult{Error: "site replication is not configured"}
+	}
+
 	// Scale the number of connections from 32 -> 4 from small to large clusters.
 	connectionsPerPeer := 3 + (29+len(clusterInfos.Sites)-1)/len(clusterInfos.Sites)
 

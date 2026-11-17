@@ -84,6 +84,17 @@ func containsReservedMetadata(header http.Header) bool {
 	return false
 }
 
+// isReservedFanOutMetadata reports whether a fan-out entry's UserMetadata key
+// (ANBM-003) is one that clients must never set directly: internal metadata or
+// object-lock metadata that would otherwise bypass the retention/legal-hold
+// authorization performed on the header path.
+func isReservedFanOutMetadata(key string) bool {
+	if stringsHasPrefixFold(key, ReservedMetadataPrefix) {
+		return true
+	}
+	return stringsHasPrefixFold(key, "X-Amz-Object-Lock-")
+}
+
 // isHTTPHeaderSizeTooLarge returns true if the provided
 // header is larger than 8 KB or the user-defined metadata
 // is larger than 2 KB.

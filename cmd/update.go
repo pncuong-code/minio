@@ -355,7 +355,11 @@ func downloadReleaseURL(u *url.URL, timeout time.Duration, mode string) (content
 		}
 	}
 
-	contentBytes, err := io.ReadAll(resp.Body)
+	// ANBM-013: updateURL is attacker-controlled (admin:ServerUpdate). Bound the
+	// read so an endless body cannot exhaust memory. The caller (parseReleaseData)
+	// no longer echoes this content back to the client, so an SSRF target's
+	// response body is never reflected.
+	contentBytes, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return content, AdminError{
 			Code:       AdminUpdateUnexpectedFailure,
@@ -407,7 +411,9 @@ func parseReleaseData(data string) (sha256Sum []byte, releaseTime time.Time, rel
 
 	fields := strings.Fields(data)
 	if len(fields) != 2 {
-		err = fmt.Errorf("Unknown release data `%s`", data)
+		// ANBM-013: do not echo the fetched body back to the client; an SSRF
+		// target's response (e.g. cloud metadata) would otherwise be reflected.
+		err = fmt.Errorf("unknown release data: expected 2 fields, got %d", len(fields))
 		return sha256Sum, releaseTime, releaseInfo, err
 	}
 

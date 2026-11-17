@@ -585,6 +585,14 @@ func (a adminAPIHandlers) SiteReplicationResyncOp(w http.ResponseWriter, r *http
 func (a adminAPIHandlers) SiteReplicationDevNull(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
+	// ANBM-007: this endpoint drains attacker-controlled bandwidth; it must not
+	// be reachable anonymously. It runs without an object layer, so authenticate
+	// with the admin signature path rather than validateAdminReq.
+	if _, s3Err := checkAdminRequestAuth(ctx, r, policy.SiteReplicationOperationAction, ""); s3Err != ErrNone {
+		writeErrorResponseJSON(ctx, w, errorCodes.ToAPIErr(s3Err), r.URL)
+		return
+	}
+
 	globalSiteNetPerfRX.Connect()
 	defer globalSiteNetPerfRX.Disconnect()
 
@@ -613,10 +621,23 @@ func (a adminAPIHandlers) SiteReplicationDevNull(w http.ResponseWriter, r *http.
 // SiteReplicationNetPerf - everything goes to io.Discard
 // [POST] /minio/admin/v3/site-replication/netperf
 func (a adminAPIHandlers) SiteReplicationNetPerf(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	// ANBM-007: unauthenticated callers could amplify outbound traffic to every
+	// peer for a caller-chosen duration. Require the site-replication action.
+	if _, s3Err := checkAdminRequestAuth(ctx, r, policy.SiteReplicationOperationAction, ""); s3Err != ErrNone {
+		writeErrorResponseJSON(ctx, w, errorCodes.ToAPIErr(s3Err), r.URL)
+		return
+	}
+
 	durationStr := r.Form.Get(peerRESTDuration)
 	duration, _ := time.ParseDuration(durationStr)
 	if duration < globalNetPerfMinDuration {
 		duration = globalNetPerfMinDuration
+	}
+	// Cap the duration so an authenticated operator cannot pin bandwidth for days.
+	if duration > globalNetPerfMaxDuration {
+		duration = globalNetPerfMaxDuration
 	}
 	result := siteNetperf(r.Context(), duration)
 	adminLogIf(r.Context(), gob.NewEncoder(w).Encode(result))

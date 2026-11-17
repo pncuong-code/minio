@@ -679,7 +679,10 @@ func isPutRetentionAllowed(bucketName, objectName string, retDays int, retDate t
 	if retDays > 0 {
 		conditions["object-lock-remaining-retention-days"] = []string{strconv.Itoa(retDays)}
 	}
-	if retMode == objectlock.RetGovernance && byPassSet {
+	// ANBM-002: the bypass-governance header must never be honoured on the
+	// strength of its presence alone. Require the s3:BypassGovernanceRetention
+	// permission whatever the requested mode, not only for GOVERNANCE.
+	if byPassSet {
 		byPassSet = globalIAMSys.IsAllowed(policy.Args{
 			AccountName:     cred.AccessKey,
 			Groups:          cred.Groups,

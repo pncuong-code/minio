@@ -2989,8 +2989,12 @@ func (api objectAPIHandlers) PutObjectRetentionHandler(w http.ResponseWriter, r 
 		return
 	}
 
-	// Check permissions to perform this object retention operation
-	if s3Error := authenticateRequest(ctx, r, policy.PutObjectRetentionAction); s3Error != ErrNone {
+	// Check permissions to perform this object retention operation.
+	// ANBM-002: authorize s3:PutObjectRetention here (not only authenticate);
+	// without it a signed user with no permission on the bucket reaches
+	// enforceRetentionBypassForPut and, for COMPLIANCE / empty modes, the raw
+	// bypass-governance header alone grants the write (see isPutRetentionAllowed).
+	if s3Error := checkRequestAuthType(ctx, r, policy.PutObjectRetentionAction, bucket, object); s3Error != ErrNone {
 		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(s3Error), r.URL)
 		return
 	}
