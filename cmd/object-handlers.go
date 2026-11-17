@@ -3185,6 +3185,11 @@ func (api objectAPIHandlers) GetObjectTaggingHandler(w http.ResponseWriter, r *h
 		if isErrObjectNotFound(err) || isErrVersionNotFound(err) {
 			proxytgts := getProxyTargets(ctx, bucket, object, opts)
 			if !proxytgts.Empty() {
+				// Authorize before reading tags from a peer site.
+				if s3Error := authorizeRequest(ctx, r, policy.GetObjectTaggingAction); s3Error != ErrNone {
+					writeErrorResponse(ctx, w, errorCodes.ToAPIErr(s3Error), r.URL)
+					return
+				}
 				globalReplicationStats.Load().incProxy(bucket, getObjectTaggingAPI, false)
 				// proxy to replication target if site replication is in place.
 				tags, gerr := proxyGetTaggingToRepTarget(ctx, bucket, object, opts, proxytgts)
@@ -3381,6 +3386,17 @@ func (api objectAPIHandlers) DeleteObjectTaggingHandler(w http.ResponseWriter, r
 		return
 	}
 
+	// Verify the request signature before anything else: the object tags are
+	// injected below as a synthesized (unsigned) x-amz-tagging header for policy
+	// evaluation, which the SigV4 verifier would otherwise reject, and the
+	// replication proxy path below must never run for unauthenticated callers.
+	logger.GetReqInfo(ctx).BucketName = bucket
+	logger.GetReqInfo(ctx).ObjectName = object
+	if s3Error := authenticateRequest(ctx, r, policy.DeleteObjectTaggingAction); s3Error != ErrNone {
+		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(s3Error), r.URL)
+		return
+	}
+
 	opts, err := getOpts(ctx, r, bucket, object)
 	if err != nil {
 		writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
@@ -3395,6 +3411,11 @@ func (api objectAPIHandlers) DeleteObjectTaggingHandler(w http.ResponseWriter, r
 		if isErrObjectNotFound(err) || isErrVersionNotFound(err) {
 			proxytgts := getProxyTargets(ctx, bucket, object, opts)
 			if !proxytgts.Empty() {
+				// Authorize before forwarding the delete to a peer site.
+				if s3Error := authorizeRequest(ctx, r, policy.DeleteObjectTaggingAction); s3Error != ErrNone {
+					writeErrorResponse(ctx, w, errorCodes.ToAPIErr(s3Error), r.URL)
+					return
+				}
 				globalReplicationStats.Load().incProxy(bucket, removeObjectTaggingAPI, false)
 				// proxy to replication target if active-active replication is in place.
 				perr := proxyTaggingToRepTarget(ctx, bucket, object, nil, opts, proxytgts)
@@ -3429,7 +3450,7 @@ func (api objectAPIHandlers) DeleteObjectTaggingHandler(w http.ResponseWriter, r
 	}
 
 	// Allow deleteObjectTagging if policy action is set
-	if s3Error := checkRequestAuthType(ctx, r, policy.DeleteObjectTaggingAction, bucket, object); s3Error != ErrNone {
+	if s3Error := authorizeRequest(ctx, r, policy.DeleteObjectTaggingAction); s3Error != ErrNone {
 		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(s3Error), r.URL)
 		return
 	}
