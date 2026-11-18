@@ -61,12 +61,12 @@ LABEL name="MinIO (pncuong-code fork)" \
       org.opencontainers.image.version="${RELEASE}" \
       org.opencontainers.image.licenses="AGPL-3.0-only"
 
-ENV MINIO_ACCESS_KEY_FILE=access_key \
-    MINIO_SECRET_KEY_FILE=secret_key \
-    MINIO_ROOT_USER_FILE=access_key \
-    MINIO_ROOT_PASSWORD_FILE=secret_key \
-    MINIO_KMS_SECRET_KEY_FILE=kms_master_key \
-    MINIO_CONFIG_ENV_FILE=config.env \
+# NOTE: the deprecated MINIO_*_KEY_FILE / *_PASSWORD_FILE default env vars from
+# the stock upstream Dockerfiles are intentionally omitted. They only set default
+# *filenames* for the legacy file-based secret mechanism (not secrets themselves),
+# and baking them in trips naive scanners (trivy DS-0031). MinIO still supports the
+# `<ENV>_FILE` convention at runtime if a deployment opts in explicitly.
+ENV MINIO_CONFIG_ENV_FILE=config.env \
     MC_CONFIG_DIR=/tmp/.mc
 
 RUN chmod -R 777 /usr/bin
