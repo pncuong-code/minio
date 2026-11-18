@@ -674,6 +674,21 @@ func isPutRetentionAllowed(bucketName, objectName string, retDays int, retDate t
 	}
 
 	conditions := getConditionValues(r, "", cred)
+	// ANBM-027: getConditionValues copies the request's X-Amz-Object-Lock-*
+	// headers into conditions under their canonical names, and the policy
+	// library resolves a condition key by its canonical spelling first. Those
+	// client-supplied values would otherwise shadow the server-authoritative
+	// retention values set below (parsed from the request body), letting a
+	// caller forge s3:object-lock-mode / retain-until-date / remaining-retention
+	// -days and slip past a retention-conditioned policy. Drop any client
+	// variant before setting the trusted values.
+	for _, k := range []string{
+		"Object-Lock-Mode", "object-lock-mode",
+		"Object-Lock-Retain-Until-Date", "object-lock-retain-until-date",
+		"Object-Lock-Remaining-Retention-Days", "object-lock-remaining-retention-days",
+	} {
+		delete(conditions, k)
+	}
 	conditions["object-lock-mode"] = []string{string(retMode)}
 	conditions["object-lock-retain-until-date"] = []string{retDate.UTC().Format(time.RFC3339)}
 	if retDays > 0 {

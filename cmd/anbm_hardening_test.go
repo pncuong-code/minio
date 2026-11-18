@@ -241,3 +241,37 @@ func TestANBMSiteReplicationPerfRequiresAuth(t *testing.T) {
 		}
 	}
 }
+
+// ANBM-023: a forged (unsigned) continuation-token must not inject a
+// path-traversal metacache id, which would let the cache writer/cleaner escape
+// the .metacache dir (e.g. recursively delete .minio.sys/config).
+func TestANBMMetacacheIDRejectsTraversal(t *testing.T) {
+	if valid := mustGetUUID(); !isValidMetacacheUUID(valid) {
+		t.Fatalf("ANBM-023: rejected a real UUID %q", valid)
+	}
+	for _, bad := range []string{
+		"../../../config", "..", "a/b", "../config", "",
+		"deadbeef", strings.Repeat("g", 36), "aaaaaaaa-aaaa-aaaa-aaaa-aaaa/aaaaaaa",
+	} {
+		if isValidMetacacheUUID(bad) {
+			t.Fatalf("ANBM-023: accepted invalid metacache id %q", bad)
+		}
+	}
+	o := listPathOptions{Marker: "listing/key[minio_cache:v2,return:,id:../../../config,p:0,s:0]"}
+	o.parseMarker()
+	if strings.Contains(o.ID, "/") || strings.Contains(o.ID, "..") || !isValidMetacacheUUID(o.ID) {
+		t.Fatalf("ANBM-023: parseMarker kept a forged id: %q", o.ID)
+	}
+}
+
+// ANBM-025: legacy SigV2 presigned material must be redacted from traces too.
+func TestANBMSigV2CredentialRedaction(t *testing.T) {
+	q := "Action=ListObjects&AWSAccessKeyId=AKIAEXAMPLE123&Signature=abc123def456%3D&Expires=1700000000"
+	got := redactTraceQuery(q)
+	if strings.Contains(got, "AKIAEXAMPLE123") || strings.Contains(got, "abc123def456") {
+		t.Fatalf("ANBM-025: SigV2 material leaked through trace: %q", got)
+	}
+	if !strings.Contains(got, "*REDACTED*") || !strings.Contains(got, "Expires=1700000000") {
+		t.Fatalf("ANBM-025: unexpected trace redaction output: %q", got)
+	}
+}

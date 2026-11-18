@@ -28,6 +28,26 @@ import (
 // Should not need to be updated unless a fundamental change is made to the marker format.
 const markerTagVersion = "v2"
 
+// isValidMetacacheUUID reports whether id has the canonical UUID shape produced
+// by mustGetUUID (8-4-4-4-12 hex). ANBM-023: metacache ids are always UUIDs
+// internally; rejecting anything else stops path-component injection through the
+// client-supplied continuation-token.
+func isValidMetacacheUUID(id string) bool {
+	if len(id) != 36 {
+		return false
+	}
+	for i := 0; i < len(id); i++ {
+		c := id[i]
+		switch {
+		case c >= '0' && c <= '9', c >= 'a' && c <= 'f', c >= 'A' && c <= 'F':
+		case c == '-' && (i == 8 || i == 13 || i == 18 || i == 23):
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // parseMarker will parse a marker possibly encoded with encodeMarker
 func (o *listPathOptions) parseMarker() {
 	s := o.Marker
@@ -50,7 +70,19 @@ func (o *listPathOptions) parseMarker() {
 				continue
 			}
 		case "id":
-			o.ID = kv[1]
+			// ANBM-023: o.ID becomes a path component via
+			// metacachePrefixForID -> pathJoin, which cleans "..". The
+			// continuation-token carrying this marker is only base64 (not
+			// signed), so a client can forge id="../../../config" and make the
+			// metacache writer/cleaner escape the cache dir (e.g. recursively
+			// delete .minio.sys/config). Accept only canonical UUID ids;
+			// anything else starts a fresh listing with a safe id.
+			if isValidMetacacheUUID(kv[1]) {
+				o.ID = kv[1]
+			} else {
+				o.ID = mustGetUUID()
+				o.Create = true
+			}
 		case "return":
 			o.ID = mustGetUUID()
 			o.Create = true

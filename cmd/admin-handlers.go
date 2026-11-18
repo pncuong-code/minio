@@ -1769,6 +1769,20 @@ func (a adminAPIHandlers) ObjectSpeedTestHandler(w http.ResponseWriter, r *http.
 	if size < 1 {
 		size = 1
 	}
+	// ANBM-022: ANBM-011 clamped duration and size but not concurrent. A
+	// negative concurrent makes make([]uint64, concurrency) panic inside a
+	// goroutine with no recover (crashing the process); concurrent==0 with
+	// autotune loops forever; a huge concurrent*size overflows the capacity
+	// check and allocates wildly. Clamp concurrent and bound size.
+	if concurrent < 1 {
+		concurrent = 1
+	}
+	if concurrent > 512 {
+		concurrent = 512
+	}
+	if size > 1<<30 {
+		size = 1 << 30
+	}
 
 	storageInfo := objectAPI.StorageInfo(ctx, false)
 

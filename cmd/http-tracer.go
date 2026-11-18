@@ -49,7 +49,9 @@ func redactLDAPPwd(s string) string {
 // tokens (WebIdentityToken for AssumeRoleWithWebIdentity, Token for
 // ClientGrants/CustomToken) and presigned SigV4 material. The (^|&) anchor
 // keeps it from matching these names as substrings of unrelated params.
-var traceQueryCredRegex = regexp.MustCompile(`(?i)(^|&)((?:WebIdentityToken|Token|X-Amz-Security-Token|X-Amz-Signature|X-Amz-Credential)=)[^&]*`)
+// ANBM-025: also mask legacy SigV2 presigned material (bare Signature= and
+// AWSAccessKeyId=), which stays replayable until Expires just like SigV4.
+var traceQueryCredRegex = regexp.MustCompile(`(?i)(^|&)((?:WebIdentityToken|Token|X-Amz-Security-Token|X-Amz-Signature|X-Amz-Credential|Signature|AWSAccessKeyId)=)[^&]*`)
 
 // redactTraceQuery masks credentials carried in a raw query string before the
 // request line reaches a trace subscriber. ANBM-006: switching the STS routes
@@ -67,6 +69,7 @@ var sensitiveTraceHeaders = []string{
 	xhttp.Authorization,
 	xhttp.AmzSecurityToken,
 	"Cookie",
+	"Proxy-Authorization",
 	xhttp.AmzServerSideEncryptionCustomerKey,
 	xhttp.AmzServerSideEncryptionCopyCustomerKey,
 }

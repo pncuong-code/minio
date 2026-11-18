@@ -389,6 +389,12 @@ func (api objectAPIHandlers) getObjectHandler(ctx context.Context, objectAPI Obj
 
 		if oi.UserTags != "" {
 			r.Header.Set(xhttp.AmzObjectTagging, oi.UserTags)
+		} else {
+			// ANBM-028: the object has no tags, so a client-supplied
+			// X-Amz-Tagging header must not survive into the authz check — it
+			// would be read as s3:ExistingObjectTag and satisfy a tag-based
+			// policy on an untagged object.
+			r.Header.Del(xhttp.AmzObjectTagging)
 		}
 
 		if s3Error := authorizeRequest(ctx, r, policy.GetObjectAction); s3Error != ErrNone {
@@ -583,6 +589,11 @@ func (api objectAPIHandlers) getObjectAttributesHandler(ctx context.Context, obj
 	if !valid {
 		return
 	}
+
+	// ANBM-028: GetObjectAttributes never loads the object's real tags before
+	// authz, so any inbound X-Amz-Tagging is client-supplied. Strip it so it
+	// cannot be read as s3:ExistingObjectTag and satisfy a tag-based policy.
+	r.Header.Del(xhttp.AmzObjectTagging)
 
 	var s3Error APIErrorCode
 	if opts.VersionID != "" {
@@ -842,6 +853,10 @@ func (api objectAPIHandlers) headObjectHandler(ctx context.Context, objectAPI Ob
 	if objInfo.UserTags != "" {
 		// Set this such that authorization policies can be applied on the object tags.
 		r.Header.Set(xhttp.AmzObjectTagging, objInfo.UserTags)
+	} else {
+		// ANBM-028: strip a forged client X-Amz-Tagging on an untagged object so
+		// it cannot satisfy an s3:ExistingObjectTag policy condition.
+		r.Header.Del(xhttp.AmzObjectTagging)
 	}
 
 	if s3Error := authorizeRequest(ctx, r, policy.GetObjectAction); s3Error != ErrNone {

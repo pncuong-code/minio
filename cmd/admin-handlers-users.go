@@ -2471,7 +2471,8 @@ func (a adminAPIHandlers) importIAM(w http.ResponseWriter, r *http.Request, apiV
 		return
 	}
 
-	data, err := io.ReadAll(r.Body)
+	// ANBM-029: bound the IAM import upload (global limiter caps at ~5TiB).
+	data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<30))
 	if err != nil {
 		writeErrorResponseJSON(ctx, w, errorCodes.ToAPIErr(ErrInvalidRequest), r.URL)
 		return

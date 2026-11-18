@@ -243,6 +243,13 @@ func checkAssumeRoleAuth(ctx context.Context, r *http.Request) (auth.Credentials
 }
 
 func parseForm(r *http.Request) error {
+	// ANBM-024: STS endpoints are anonymous and the global request limiter
+	// wraps r.Body in a ~5TiB MaxBytesReader; net/http's ParseForm skips its own
+	// 10MB cap when the body is already a *maxBytesReader, so it would read the
+	// whole body into memory — one large anonymous POST to "/" could OOM the
+	// node. Enforce the (previously unused) stsRequestBodyLimit here. STS
+	// payloads (tokens, usernames, inline policies) are small.
+	r.Body = http.MaxBytesReader(nil, r.Body, stsRequestBodyLimit)
 	if err := r.ParseForm(); err != nil {
 		return err
 	}

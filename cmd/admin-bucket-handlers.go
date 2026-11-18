@@ -652,7 +652,9 @@ func (a adminAPIHandlers) ImportBucketMetadataHandler(w http.ResponseWriter, r *
 	if objectAPI == nil {
 		return
 	}
-	data, err := io.ReadAll(r.Body)
+	// ANBM-029: bound the import upload so it cannot read an unbounded body into
+	// memory (the global request limiter caps at ~5TiB).
+	data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<30))
 	if err != nil {
 		writeErrorResponseJSON(ctx, w, errorCodes.ToAPIErr(ErrInvalidRequest), r.URL)
 		return

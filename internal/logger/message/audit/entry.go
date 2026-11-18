@@ -63,7 +63,9 @@ func ToEntry(w http.ResponseWriter, r *http.Request, reqClaims map[string]any, d
 	for k := range reqQuery {
 		switch strings.ToLower(k) {
 		case "x-amz-security-token", "x-amz-signature", "x-amz-credential",
-			"token", "webidentitytoken":
+			"token", "webidentitytoken",
+			// ANBM-025: legacy SigV2 presigned material is replayable too.
+			"signature", "awsaccesskeyid":
 			reqQuery[k] = "*REDACTED*"
 		}
 	}
@@ -81,6 +83,9 @@ func ToEntry(w http.ResponseWriter, r *http.Request, reqClaims map[string]any, d
 		xhttp.AmzServerSideEncryptionCopyCustomerKey,
 		xhttp.AmzSecurityToken,
 		xhttp.Authorization,
+		// ANBM-025: match the trace redaction set (canonical header names).
+		"Cookie",
+		"Proxy-Authorization",
 	} {
 		if _, ok := reqHeader[h]; ok {
 			reqHeader[h] = "*REDACTED*"
