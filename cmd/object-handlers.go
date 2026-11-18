@@ -1036,7 +1036,7 @@ func (api objectAPIHandlers) HeadObjectHandler(w http.ResponseWriter, r *http.Re
 
 // Extract metadata relevant for an CopyObject operation based on conditional
 // header values specified in X-Amz-Metadata-Directive.
-func getCpObjMetadataFromHeader(ctx context.Context, r *http.Request, userMeta map[string]string) (map[string]string, error) {
+func getCpObjMetadataFromHeader(ctx context.Context, r *http.Request, userMeta map[string]string, allowReplication bool) (map[string]string, error) {
 	// Make a copy of the supplied metadata to avoid
 	// to change the original one.
 	defaultMeta := make(map[string]string, len(userMeta))
@@ -1067,6 +1067,11 @@ func getCpObjMetadataFromHeader(ctx context.Context, r *http.Request, userMeta m
 		if err != nil {
 			return nil, err
 		}
+		if allowReplication {
+			if err = extractReplicationMetadataFromMime(ctx, textproto.MIMEHeader(r.Header), emetadata); err != nil {
+				return nil, err
+			}
+		}
 		if sc != "" {
 			emetadata[xhttp.AmzStorageClass] = sc
 		}
@@ -1085,6 +1090,31 @@ func getCpObjMetadataFromHeader(ctx context.Context, r *http.Request, userMeta m
 
 	// Copy is default behavior if not x-amz-metadata-directive is set.
 	return defaultMeta, nil
+}
+
+func cloneRequestWithoutCopyReplicationHeaders(r *http.Request) *http.Request {
+	if r == nil {
+		return nil
+	}
+
+	clone := new(http.Request)
+	*clone = *r
+	clone.Header = r.Header.Clone()
+
+	for _, header := range []string{
+		xhttp.MinIOSourceReplicationRequest,
+		xhttp.MinIOSourceETag,
+		xhttp.MinIOSourceMTime,
+		xhttp.MinIOSourceTaggingTimestamp,
+		xhttp.MinIOSourceObjectRetentionTimestamp,
+		xhttp.MinIOSourceObjectLegalHoldTimestamp,
+		xhttp.MinIOReplicationActualObjectSize,
+		ReplicationSsecChecksumHeader,
+	} {
+		clone.Header.Del(header)
+	}
+
+	return clone
 }
 
 // getRemoteInstanceTransport contains a roundtripper for external (not peers) servers
@@ -1232,6 +1262,19 @@ func (api objectAPIHandlers) CopyObjectHandler(w http.ResponseWriter, r *http.Re
 		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(ErrInvalidStorageClass), r.URL)
 		return
 	}
+	allowReplicationMetadata := false
+	if r.Header.Get(xhttp.AmzBucketReplicationStatus) == replication.Replica.String() {
+		if s3Error := checkRequestAuthType(ctx, r, policy.ReplicateObjectAction, dstBucket, dstObject); s3Error != ErrNone {
+			writeErrorResponse(ctx, w, errorCodes.ToAPIErr(s3Error), r.URL)
+			return
+		}
+		allowReplicationMetadata = true
+	}
+	trustedReplicationRequest := allowReplicationMetadata && r.Header.Get(xhttp.MinIOSourceReplicationRequest) == "true"
+	optsReq := r
+	if !trustedReplicationRequest {
+		optsReq = cloneRequestWithoutCopyReplicationHeaders(r)
+	}
 
 	// Check if bucket encryption is enabled
 	sseConfig, _ := globalBucketSSEConfigSys.Get(dstBucket)
@@ -1240,7 +1283,7 @@ func (api objectAPIHandlers) CopyObjectHandler(w http.ResponseWriter, r *http.Re
 	})
 
 	var srcOpts, dstOpts ObjectOptions
-	srcOpts, err = copySrcOpts(ctx, r, srcBucket, srcObject)
+	srcOpts, err = copySrcOpts(ctx, optsReq, srcBucket, srcObject)
 	if err != nil {
 		writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
 		return
@@ -1252,14 +1295,14 @@ func (api objectAPIHandlers) CopyObjectHandler(w http.ResponseWriter, r *http.Re
 		VersionID:          srcOpts.VersionID,
 		Versioned:          srcOpts.Versioned,
 		VersionSuspended:   srcOpts.VersionSuspended,
-		ReplicationRequest: r.Header.Get(xhttp.MinIOSourceReplicationRequest) == "true",
+		ReplicationRequest: trustedReplicationRequest,
 	}
 	getSSE := encrypt.SSE(srcOpts.ServerSideEncryption)
 	if getSSE != srcOpts.ServerSideEncryption {
 		getOpts.ServerSideEncryption = getSSE
 	}
 
-	dstOpts, err = copyDstOpts(ctx, r, dstBucket, dstObject, nil)
+	dstOpts, err = copyDstOpts(ctx, optsReq, dstBucket, dstObject, nil)
 	if err != nil {
 		writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
 		return
@@ -1269,7 +1312,7 @@ func (api objectAPIHandlers) CopyObjectHandler(w http.ResponseWriter, r *http.Re
 	getObjectNInfo := objectAPI.GetObjectNInfo
 
 	checkCopyPrecondFn := func(o ObjectInfo) bool {
-		if _, err := DecryptObjectInfo(&o, r); err != nil {
+		if _, err := DecryptObjectInfo(&o, optsReq); err != nil {
 			writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
 			return true
 		}
@@ -1380,7 +1423,7 @@ func (api objectAPIHandlers) CopyObjectHandler(w http.ResponseWriter, r *http.Re
 		return
 	}
 	// Encryption parameters not present for this object.
-	if crypto.SSEC.IsEncrypted(srcInfo.UserDefined) && !crypto.SSECopy.IsRequested(r.Header) && r.Header.Get(xhttp.MinIOSourceReplicationRequest) != "true" {
+	if crypto.SSEC.IsEncrypted(srcInfo.UserDefined) && !crypto.SSECopy.IsRequested(r.Header) && !trustedReplicationRequest {
 		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(ErrInvalidSSECustomerAlgorithm), r.URL)
 		return
 	}
@@ -1546,7 +1589,7 @@ func (api objectAPIHandlers) CopyObjectHandler(w http.ResponseWriter, r *http.Re
 
 	srcInfo.PutObjReader = pReader
 
-	srcInfo.UserDefined, err = getCpObjMetadataFromHeader(ctx, r, srcInfo.UserDefined)
+	srcInfo.UserDefined, err = getCpObjMetadataFromHeader(ctx, r, srcInfo.UserDefined, allowReplicationMetadata)
 	if err != nil {
 		writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
 		return
@@ -1628,10 +1671,10 @@ func (api objectAPIHandlers) CopyObjectHandler(w http.ResponseWriter, r *http.Re
 		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(s3Err), r.URL)
 		return
 	}
-	if rs := r.Header.Get(xhttp.AmzBucketReplicationStatus); rs != "" {
+	if allowReplicationMetadata {
 		srcInfo.UserDefined[ReservedMetadataPrefixLower+ReplicaStatus] = replication.Replica.String()
 		srcInfo.UserDefined[ReservedMetadataPrefixLower+ReplicaTimestamp] = UTCNow().Format(time.RFC3339Nano)
-		srcInfo.UserDefined[xhttp.AmzBucketReplicationStatus] = rs
+		srcInfo.UserDefined[xhttp.AmzBucketReplicationStatus] = replication.Replica.String()
 	}
 
 	op := replication.ObjectReplicationType
@@ -1896,7 +1939,7 @@ func (api objectAPIHandlers) PutObjectHandler(w http.ResponseWriter, r *http.Req
 		}
 	case authTypeStreamingUnsignedTrailer:
 		// Initialize stream chunked reader with optional trailers.
-		rd, s3Err = newUnsignedV4ChunkedReader(r, true, r.Header.Get(xhttp.Authorization) != "")
+		rd, s3Err = newUnsignedV4ChunkedReader(r, true)
 		if s3Err != ErrNone {
 			writeErrorResponse(ctx, w, errorCodes.ToAPIErr(s3Err), r.URL)
 			return
@@ -1931,6 +1974,10 @@ func (api objectAPIHandlers) PutObjectHandler(w http.ResponseWriter, r *http.Req
 	if r.Header.Get(xhttp.AmzBucketReplicationStatus) == replication.Replica.String() {
 		if s3Err = isPutActionAllowed(ctx, getRequestAuthType(r), bucket, object, r, policy.ReplicateObjectAction); s3Err != ErrNone {
 			writeErrorResponse(ctx, w, errorCodes.ToAPIErr(s3Err), r.URL)
+			return
+		}
+		if err = extractReplicationMetadataFromMime(ctx, textproto.MIMEHeader(r.Header), metadata); err != nil {
+			writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
 			return
 		}
 		metadata[ReservedMetadataPrefixLower+ReplicaStatus] = replication.Replica.String()
@@ -2242,7 +2289,7 @@ func (api objectAPIHandlers) PutObjectExtractHandler(w http.ResponseWriter, r *h
 	// if Content-Length is unknown/missing, deny the request
 	size := r.ContentLength
 	rAuthType := getRequestAuthType(r)
-	if rAuthType == authTypeStreamingSigned || rAuthType == authTypeStreamingSignedTrailer {
+	if rAuthType == authTypeStreamingSigned || rAuthType == authTypeStreamingSignedTrailer || rAuthType == authTypeStreamingUnsignedTrailer {
 		if sizeStr, ok := r.Header[xhttp.AmzDecodedContentLength]; ok {
 			if sizeStr[0] == "" {
 				writeErrorResponse(ctx, w, errorCodes.ToAPIErr(ErrMissingContentLength), r.URL)
@@ -2292,6 +2339,13 @@ func (api objectAPIHandlers) PutObjectExtractHandler(w http.ResponseWriter, r *h
 	case authTypeStreamingSigned, authTypeStreamingSignedTrailer:
 		// Initialize stream signature verifier.
 		reader, s3Err = newSignV4ChunkedReader(r, rAuthType == authTypeStreamingSignedTrailer)
+		if s3Err != ErrNone {
+			writeErrorResponse(ctx, w, errorCodes.ToAPIErr(s3Err), r.URL)
+			return
+		}
+	case authTypeStreamingUnsignedTrailer:
+		// Initialize stream chunked reader with optional trailers.
+		reader, s3Err = newUnsignedV4ChunkedReader(r, true)
 		if s3Err != ErrNone {
 			writeErrorResponse(ctx, w, errorCodes.ToAPIErr(s3Err), r.URL)
 			return
@@ -2388,9 +2442,14 @@ func (api objectAPIHandlers) PutObjectExtractHandler(w http.ResponseWriter, r *h
 		rawReader := hashReader
 		pReader := NewPutObjReader(rawReader)
 
+		allowReplicationMetadata := false
 		if r.Header.Get(xhttp.AmzBucketReplicationStatus) == replication.Replica.String() {
 			if s3Err = isPutActionAllowed(ctx, getRequestAuthType(r), bucket, object, r, policy.ReplicateObjectAction); s3Err != ErrNone {
 				return errors.New(errorCodes.ToAPIErr(s3Err).Code)
+			}
+			allowReplicationMetadata = true
+			if err = extractReplicationMetadataFromMime(ctx, textproto.MIMEHeader(r.Header), metadata); err != nil {
+				return err
 			}
 			metadata[ReservedMetadataPrefixLower+ReplicaStatus] = replication.Replica.String()
 			metadata[ReservedMetadataPrefixLower+ReplicaTimestamp] = UTCNow().Format(time.RFC3339Nano)
@@ -2416,6 +2475,11 @@ func (api objectAPIHandlers) PutObjectExtractHandler(w http.ResponseWriter, r *h
 			m, err := extractMetadata(ctx, textproto.MIMEHeader(hdrs))
 			if err != nil {
 				return err
+			}
+			if allowReplicationMetadata {
+				if err = extractReplicationMetadataFromMime(ctx, textproto.MIMEHeader(hdrs), m); err != nil {
+					return err
+				}
 			}
 			maps.Copy(metadata, m)
 		} else {
@@ -2925,7 +2989,15 @@ func (api objectAPIHandlers) PutObjectRetentionHandler(w http.ResponseWriter, r 
 		return
 	}
 
-	// Check permissions to perform this object retention operation
+	// Check permissions to perform this object retention operation.
+	// ANBM-002: authorization is enforced condition-aware inside
+	// isPutRetentionAllowed (reached via enforceRetentionBypassForPut below)
+	// AFTER the retention body is parsed, where s3:object-lock-mode /
+	// retain-until-date are available and the bypass-governance header is gated
+	// on s3:BypassGovernanceRetention for every mode. Do not authorize here:
+	// that runs before the body parse, so a policy that grants
+	// s3:PutObjectRetention conditioned on the lock mode would be wrongly denied.
+	// Authenticate only.
 	if s3Error := authenticateRequest(ctx, r, policy.PutObjectRetentionAction); s3Error != ErrNone {
 		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(s3Error), r.URL)
 		return
@@ -3121,6 +3193,11 @@ func (api objectAPIHandlers) GetObjectTaggingHandler(w http.ResponseWriter, r *h
 		if isErrObjectNotFound(err) || isErrVersionNotFound(err) {
 			proxytgts := getProxyTargets(ctx, bucket, object, opts)
 			if !proxytgts.Empty() {
+				// Authorize before reading tags from a peer site.
+				if s3Error := authorizeRequest(ctx, r, policy.GetObjectTaggingAction); s3Error != ErrNone {
+					writeErrorResponse(ctx, w, errorCodes.ToAPIErr(s3Error), r.URL)
+					return
+				}
 				globalReplicationStats.Load().incProxy(bucket, getObjectTaggingAPI, false)
 				// proxy to replication target if site replication is in place.
 				tags, gerr := proxyGetTaggingToRepTarget(ctx, bucket, object, opts, proxytgts)
@@ -3201,11 +3278,21 @@ func (api objectAPIHandlers) PutObjectTaggingHandler(w http.ResponseWriter, r *h
 		return
 	}
 
-	// Set this such that authorization policies can be applied on the object tags.
+	logger.GetReqInfo(ctx).BucketName = bucket
+	logger.GetReqInfo(ctx).ObjectName = object
+	if s3Error := authenticateRequest(ctx, r, policy.PutObjectTaggingAction); s3Error != ErrNone {
+		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(s3Error), r.URL)
+		return
+	}
+
+	// Set this such that authorization policies can be applied on the object
+	// tags. This is derived from the request body, so it must be injected only
+	// after signature verification: the SigV4 verifier now rejects unsigned
+	// x-amz-* request headers, and this synthesized header is never signed.
 	r.Header.Set(xhttp.AmzObjectTagging, tags.String())
 
 	// Allow putObjectTagging if policy action is set
-	if s3Error := checkRequestAuthType(ctx, r, policy.PutObjectTaggingAction, bucket, object); s3Error != ErrNone {
+	if s3Error := authorizeRequest(ctx, r, policy.PutObjectTaggingAction); s3Error != ErrNone {
 		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(s3Error), r.URL)
 		return
 	}
@@ -3307,6 +3394,17 @@ func (api objectAPIHandlers) DeleteObjectTaggingHandler(w http.ResponseWriter, r
 		return
 	}
 
+	// Verify the request signature before anything else: the object tags are
+	// injected below as a synthesized (unsigned) x-amz-tagging header for policy
+	// evaluation, which the SigV4 verifier would otherwise reject, and the
+	// replication proxy path below must never run for unauthenticated callers.
+	logger.GetReqInfo(ctx).BucketName = bucket
+	logger.GetReqInfo(ctx).ObjectName = object
+	if s3Error := authenticateRequest(ctx, r, policy.DeleteObjectTaggingAction); s3Error != ErrNone {
+		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(s3Error), r.URL)
+		return
+	}
+
 	opts, err := getOpts(ctx, r, bucket, object)
 	if err != nil {
 		writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
@@ -3321,6 +3419,11 @@ func (api objectAPIHandlers) DeleteObjectTaggingHandler(w http.ResponseWriter, r
 		if isErrObjectNotFound(err) || isErrVersionNotFound(err) {
 			proxytgts := getProxyTargets(ctx, bucket, object, opts)
 			if !proxytgts.Empty() {
+				// Authorize before forwarding the delete to a peer site.
+				if s3Error := authorizeRequest(ctx, r, policy.DeleteObjectTaggingAction); s3Error != ErrNone {
+					writeErrorResponse(ctx, w, errorCodes.ToAPIErr(s3Error), r.URL)
+					return
+				}
 				globalReplicationStats.Load().incProxy(bucket, removeObjectTaggingAPI, false)
 				// proxy to replication target if active-active replication is in place.
 				perr := proxyTaggingToRepTarget(ctx, bucket, object, nil, opts, proxytgts)
@@ -3355,7 +3458,7 @@ func (api objectAPIHandlers) DeleteObjectTaggingHandler(w http.ResponseWriter, r
 	}
 
 	// Allow deleteObjectTagging if policy action is set
-	if s3Error := checkRequestAuthType(ctx, r, policy.DeleteObjectTaggingAction, bucket, object); s3Error != ErrNone {
+	if s3Error := authorizeRequest(ctx, r, policy.DeleteObjectTaggingAction); s3Error != ErrNone {
 		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(s3Error), r.URL)
 		return
 	}

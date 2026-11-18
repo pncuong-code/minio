@@ -422,6 +422,7 @@ var (
 
 	// Used for collecting stats for netperf
 	globalNetPerfMinDuration     = time.Second * 10
+	globalNetPerfMaxDuration     = time.Minute * 10
 	globalNetPerfRX              netPerfRX
 	globalSiteNetPerfRX          netPerfRX
 	globalObjectPerfBucket       = "minio-perf-test-tmp-bucket"

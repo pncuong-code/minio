@@ -21,7 +21,10 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/gob"
 	"errors"
 	"fmt"
@@ -117,9 +120,28 @@ func init() {
 
 const consolePrefix = "CONSOLE_"
 
+// consoleSessionPassphrase returns the passphrase the embedded Console feeds
+// into PBKDF2 to derive the key that seals session tokens (cookie "token").
+//
+// CVE-2026-113466: upstream passed globalDeploymentID() as both passphrase and
+// salt. The deployment ID is not a secret (it is returned in the
+// x-minio-deployment-id response header, admin info, metrics and diagnostics),
+// so anyone who learned it could decrypt captured Console cookies (which carry
+// the user's STS access/secret/session keys) or forge new session tokens.
+// Bind the key to the root secret instead; the deployment ID is kept only as
+// domain separation, so every node of a cluster derives the same key and
+// sessions keep working behind a load balancer. Rotating the root credential
+// invalidates all Console sessions, which is the desired behaviour.
+func consoleSessionPassphrase() string {
+	mac := hmac.New(sha256.New, []byte(globalActiveCred.SecretKey))
+	mac.Write([]byte("minio-console-session-key/v1\x00"))
+	mac.Write([]byte(globalDeploymentID()))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
 func minioConfigToConsoleFeatures() {
 	os.Setenv("CONSOLE_PBKDF_SALT", globalDeploymentID())
-	os.Setenv("CONSOLE_PBKDF_PASSPHRASE", globalDeploymentID())
+	os.Setenv("CONSOLE_PBKDF_PASSPHRASE", consoleSessionPassphrase())
 	if globalMinioEndpoint != "" {
 		os.Setenv("CONSOLE_MINIO_SERVER", globalMinioEndpoint)
 	} else {

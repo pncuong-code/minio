@@ -1760,6 +1760,16 @@ func (a adminAPIHandlers) ObjectSpeedTestHandler(w http.ResponseWriter, r *http.
 		duration = time.Second * 10
 	}
 
+	// ANBM-011: objectSpeedTest divides by duration-in-seconds and by object
+	// size inside a goroutine with no recover; a client sending duration<1s or
+	// size=0 crashes the coordinator and leaves every peer frozen. Clamp both.
+	if duration < time.Second {
+		duration = time.Second
+	}
+	if size < 1 {
+		size = 1
+	}
+
 	storageInfo := objectAPI.StorageInfo(ctx, false)
 
 	sufficientCapacity, canAutotune, capacityErrMsg := validateObjPerfOptions(ctx, storageInfo, concurrent, size, autotune)
@@ -1774,6 +1784,21 @@ func (a adminAPIHandlers) ObjectSpeedTestHandler(w http.ResponseWriter, r *http.
 
 	if autotune && !canAutotune {
 		autotune = false
+	}
+
+	// ANBM-021: the handler writes to and (below) DeletePrefix-clears
+	// speedtest/ in a client-chosen bucket via objectAPI, which bypasses IAM.
+	// Require the caller's own read+write on that bucket before touching it.
+	if customBucket != "" {
+		if rd, wr := isAllowedRWAccess(r, creds, customBucket); !rd || !wr {
+			writeErrorResponseJSON(ctx, w, toAdminAPIErr(ctx, AdminError{
+				Code: "XMinioSpeedtestInsufficientPermissions",
+				Message: fmt.Sprintf("%s does not have read and write access to '%s' bucket", creds.AccessKey,
+					customBucket),
+				StatusCode: http.StatusForbidden,
+			}), r.URL)
+			return
+		}
 	}
 
 	if customBucket == "" {

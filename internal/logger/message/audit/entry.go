@@ -55,11 +55,36 @@ func ToEntry(w http.ResponseWriter, r *http.Request, reqClaims map[string]any, d
 	for k, v := range q {
 		reqQuery[k] = strings.Join(v, ",")
 	}
+	// ANBM-014: audit entries ship to external sinks (webhook, Kafka) whose
+	// readers are not MinIO principals. Presigned requests carry reusable
+	// credentials in the query (X-Amz-Security-Token, X-Amz-Signature,
+	// X-Amz-Credential) and STS calls carry bearer tokens (Token,
+	// WebIdentityToken); redact them the same way as the headers below.
+	for k := range reqQuery {
+		switch strings.ToLower(k) {
+		case "x-amz-security-token", "x-amz-signature", "x-amz-credential",
+			"token", "webidentitytoken":
+			reqQuery[k] = "*REDACTED*"
+		}
+	}
 	entry.ReqQuery = reqQuery
 
 	reqHeader := make(map[string]string, len(r.Header))
 	for k, v := range r.Header {
 		reqHeader[k] = strings.Join(v, ",")
+	}
+	// ANBM-014: audit entries are shipped to external sinks (webhook, Kafka)
+	// whose readers are not MinIO principals. Never let SSE-C customer keys or
+	// the security token leave the server through them.
+	for _, h := range []string{
+		xhttp.AmzServerSideEncryptionCustomerKey,
+		xhttp.AmzServerSideEncryptionCopyCustomerKey,
+		xhttp.AmzSecurityToken,
+		xhttp.Authorization,
+	} {
+		if _, ok := reqHeader[h]; ok {
+			reqHeader[h] = "*REDACTED*"
+		}
 	}
 	entry.ReqHeader = reqHeader
 

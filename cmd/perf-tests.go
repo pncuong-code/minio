@@ -34,6 +34,7 @@ import (
 	"github.com/minio/madmin-go/v3"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
+	"github.com/minio/minio-go/v7/pkg/signer"
 	xhttp "github.com/minio/minio/internal/http"
 	xioutil "github.com/minio/minio/internal/ioutil"
 	"github.com/minio/pkg/v3/randreader"
@@ -362,6 +363,12 @@ func siteNetperf(ctx context.Context, duration time.Duration) madmin.SiteNetPerf
 		return madmin.SiteNetPerfNodeResult{Error: err.Error()}
 	}
 
+	// ANBM-007: with site replication disabled the peer list is empty and the
+	// division below panics. Fail closed instead of crashing the node.
+	if len(clusterInfos.Sites) == 0 {
+		return madmin.SiteNetPerfNodeResult{Error: "site replication is not configured"}
+	}
+
 	// Scale the number of connections from 32 -> 4 from small to large clusters.
 	connectionsPerPeer := 3 + (29+len(clusterInfos.Sites)-1)/len(clusterInfos.Sites)
 
@@ -436,6 +443,9 @@ func perfNetRequest(ctx context.Context, deploymentID, reqPath string, reader io
 		result.Error = err.Error()
 		return result
 	}
+	ak, sk := cli.GetAccessAndSecretKey()
+	req.Header.Set(xhttp.AmzContentSha256, unsignedPayload)
+	req = signer.SignV4(*req, ak, sk, "", "")
 	client := &http.Client{
 		Transport: globalRemoteTargetTransport,
 	}

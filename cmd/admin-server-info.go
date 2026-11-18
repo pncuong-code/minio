@@ -35,6 +35,26 @@ import (
 
 // getLocalServerProperty - returns madmin.ServerProperties for only the
 // local endpoints from given list of endpoints
+// isSensitiveEnvKey reports whether a MINIO_* environment variable name is
+// likely to hold a secret and must be redacted from ServerInfo (ANBM-012).
+func isSensitiveEnvKey(key string) bool {
+	k := strings.ToLower(key)
+	for _, tok := range []string{
+		"password", "passwd", "secret", "token", "credential",
+		"connection_string", "dsn", "license", "api_key", "apikey",
+	} {
+		if strings.Contains(k, tok) {
+			return true
+		}
+	}
+	// Keep the original "ends in key" rule (covers *_ACCESS_KEY, *_SECRET_KEY).
+	// Do NOT redact on a plain "_url" suffix: MINIO_SERVER_URL,
+	// MINIO_BROWSER_REDIRECT_URL, MINIO_IDENTITY_OPENID_CONFIG_URL and the like
+	// are non-secret endpoints that monitoring / support bundles need. Secret
+	// URLs are already caught above by connection_string / dsn.
+	return strings.HasSuffix(k, "key")
+}
+
 func getLocalServerProperty(endpointServerPools EndpointServerPools, r *http.Request, metrics bool) madmin.ServerProperties {
 	addr := globalLocalNodeName
 	if r != nil {
@@ -150,7 +170,12 @@ func getLocalServerProperty(endpointServerPools EndpointServerPools, r *http.Req
 		}
 
 		// Do not send sensitive creds.
-		if _, ok := sensitive[key]; ok || strings.Contains(strings.ToLower(key), "password") || strings.HasSuffix(strings.ToLower(key), "key") {
+		// ANBM-012: the previous heuristic ("password" substring or "key"
+		// suffix) leaked configured secrets reachable by admin:ServerInfo (part
+		// of the "diagnostics" policy): OIDC client secrets, *_AUTH_TOKEN,
+		// notification DSN / connection strings, MINIO_CERT_PASSWD, the SUBNET
+		// license. Widen the match to the token families these use.
+		if _, ok := sensitive[key]; ok || isSensitiveEnvKey(key) {
 			props.MinioEnvVars[key] = "*** EXISTS, REDACTED ***"
 			continue
 		}

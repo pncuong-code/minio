@@ -1156,18 +1156,31 @@ func (api objectAPIHandlers) PostPolicyBucketHandler(w http.ResponseWriter, r *h
 	if len(fanOutEntries) > 0 {
 		// Once signature is validated, check if the user has
 		// explicit permissions for the user.
-		if !globalIAMSys.IsAllowed(policy.Args{
-			AccountName:     cred.AccessKey,
-			Groups:          cred.Groups,
-			Action:          policy.PutObjectFanOutAction,
-			ConditionValues: getConditionValues(r, "", cred),
-			BucketName:      bucket,
-			ObjectName:      object,
-			IsOwner:         globalActiveCred.AccessKey == cred.AccessKey,
-			Claims:          cred.Claims,
-		}) {
-			writeErrorResponse(ctx, w, errorCodes.ToAPIErr(ErrAccessDenied), r.URL)
-			return
+		// ANBM-003: the fan-out list is attacker-supplied and each entry can
+		// name a different key. Authorize PutObjectFanOut for EVERY target key,
+		// not just the form Key, or a prefix-scoped user writes outside its
+		// prefix. Also reject reserved / object-lock metadata smuggled in the
+		// JSON body (it never passes through the header filter).
+		for i := range fanOutEntries {
+			if !globalIAMSys.IsAllowed(policy.Args{
+				AccountName:     cred.AccessKey,
+				Groups:          cred.Groups,
+				Action:          policy.PutObjectFanOutAction,
+				ConditionValues: getConditionValues(r, "", cred),
+				BucketName:      bucket,
+				ObjectName:      fanOutEntries[i].Key,
+				IsOwner:         globalActiveCred.AccessKey == cred.AccessKey,
+				Claims:          cred.Claims,
+			}) {
+				writeErrorResponse(ctx, w, errorCodes.ToAPIErr(ErrAccessDenied), r.URL)
+				return
+			}
+			for k := range fanOutEntries[i].UserMetadata {
+				if isReservedFanOutMetadata(k) {
+					writeErrorResponse(ctx, w, errorCodes.ToAPIErr(ErrInvalidMetadataDirective), r.URL)
+					return
+				}
+			}
 		}
 	} else {
 		// Once signature is validated, check if the user has

@@ -574,6 +574,27 @@ func (a adminAPIHandlers) ExportBucketMetadataHandler(w http.ResponseWriter, r *
 					writeErrorResponseJSON(ctx, w, toAdminAPIErr(ctx, err), r.URL)
 					return
 				}
+				// ANBM/F-DATA-1: the exported zip is handed to any holder of
+				// admin:ExportBucketMetadata, and the normal list path
+				// (ListRemoteTargetsHandler) never returns target credentials.
+				// Strip each remote-target SecretKey / SessionToken before
+				// marshalling so the backup does not leak every replication
+				// peer's credentials in plaintext. ImportBucketMetadata already
+				// omits replication config (it cannot restore these creds), so
+				// the redaction loses nothing on round-trip. Copy first: config
+				// aliases the live cached metadata and must not be mutated.
+				redacted := *config
+				redacted.Targets = make([]madmin.BucketTarget, len(config.Targets))
+				for i := range config.Targets {
+					redacted.Targets[i] = config.Targets[i]
+					if config.Targets[i].Credentials != nil {
+						c := *config.Targets[i].Credentials
+						c.SecretKey = ""
+						c.SessionToken = ""
+						redacted.Targets[i].Credentials = &c
+					}
+				}
+				config = &redacted
 				configData, err := xml.Marshal(config)
 				if err != nil {
 					writeErrorResponse(ctx, w, exportError(ctx, err, cfgFile, bucket), r.URL)
