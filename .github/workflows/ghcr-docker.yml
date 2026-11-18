@@ -1,11 +1,16 @@
-name: Publish Docker image (ghcr.io)
+name: Publish Docker image
 
 # Builds the PATCHED MinIO fork from source (Dockerfile.ghcr) and pushes a
-# multi-arch image to GitHub Container Registry: ghcr.io/<owner>/minio.
+# multi-arch image to:
+#   - GitHub Container Registry: ghcr.io/<owner>/minio   (always)
+#   - Docker Hub: docker.io/<DOCKERHUB_USERNAME>/minio    (only if the
+#     DOCKERHUB_USERNAME + DOCKERHUB_TOKEN repo secrets are set)
 #
-# First publish note: a brand-new GHCR package is PRIVATE by default. Nothing
-# becomes public until the repo owner flips the package visibility to Public in
-# the package settings. So pushing this workflow does not expose anything yet.
+# Visibility:
+#   - GHCR: a new package is PRIVATE until the owner flips it to Public in the
+#     package settings (GitHub has no API for this).
+#   - Docker Hub: the job calls the Hub API to set the repo Public after push,
+#     so it is public-by-command with no UI step.
 
 on:
   push:
@@ -26,6 +31,8 @@ concurrency:
 jobs:
   build-push:
     runs-on: ubuntu-latest
+    env:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -54,10 +61,29 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           echo "Image version: ${TAG}"
 
-      - name: Lowercase image name
-        id: img
+      - name: Compose image tags
+        id: tags
         run: |
-          echo "name=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          GHCR="ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')"
+          REL='${{ steps.ver.outputs.release_tag }}'
+          SHORT='${{ steps.ver.outputs.short }}'
+          LIST="${GHCR}:latest
+          ${GHCR}:${REL}
+          ${GHCR}:sha-${SHORT}"
+          if [ -n "${DOCKERHUB_USERNAME:-}" ]; then
+            DH="docker.io/${DOCKERHUB_USERNAME}/minio"
+            LIST="${LIST}
+          ${DH}:latest
+          ${DH}:${REL}
+          ${DH}:sha-${SHORT}"
+          fi
+          {
+            echo "list<<EOF"
+            echo "${LIST}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "Tags:"; echo "${LIST}"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -72,6 +98,14 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Log in to Docker Hub
+        if: ${{ env.DOCKERHUB_USERNAME != '' }}
+        uses: docker/login-action@v3
+        with:
+          registry: docker.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
@@ -80,10 +114,7 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           provenance: false
-          tags: |
-            ${{ steps.img.outputs.name }}:latest
-            ${{ steps.img.outputs.name }}:${{ steps.ver.outputs.release_tag }}
-            ${{ steps.img.outputs.name }}:sha-${{ steps.ver.outputs.short }}
+          tags: ${{ steps.tags.outputs.list }}
           build-args: |
             VERSION=${{ steps.ver.outputs.version }}
             RELEASE=${{ steps.ver.outputs.release_tag }}
@@ -93,14 +124,33 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Ensure Docker Hub repo is public
+        if: ${{ env.DOCKERHUB_USERNAME != '' }}
+        env:
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          JWT="$(curl -s -H 'Content-Type: application/json' -X POST \
+            -d "{\"username\":\"${DOCKERHUB_USERNAME}\",\"password\":\"${DOCKERHUB_TOKEN}\"}" \
+            https://hub.docker.com/v2/users/login/ | jq -r '.token // empty')"
+          if [ -z "$JWT" ]; then
+            echo "::warning::Could not authenticate to Docker Hub API; repo visibility not changed (push still succeeded)."
+            exit 0
+          fi
+          CODE="$(curl -s -o /dev/null -w '%{http_code}' -X PATCH \
+            -H "Authorization: JWT ${JWT}" -H 'Content-Type: application/json' \
+            -d '{"is_private": false}' \
+            "https://hub.docker.com/v2/repositories/${DOCKERHUB_USERNAME}/minio/")"
+          echo "Set repo public -> HTTP ${CODE}"
+
       - name: Summary
         run: |
           {
             echo "### Docker image published"
             echo ""
-            echo "- \`${{ steps.img.outputs.name }}:latest\`"
-            echo "- \`${{ steps.img.outputs.name }}:${{ steps.ver.outputs.release_tag }}\`"
-            echo "- \`${{ steps.img.outputs.name }}:sha-${{ steps.ver.outputs.short }}\`"
+            echo "Version: \`${{ steps.ver.outputs.release_tag }}\` · platforms linux/amd64, linux/arm64"
             echo ""
-            echo "Platforms: linux/amd64, linux/arm64"
+            echo '```'
+            echo "${{ steps.tags.outputs.list }}"
+            echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
