@@ -1,0 +1,84 @@
+# syntax=docker/dockerfile:1
+
+# Build the PATCHED MinIO fork from source.
+#
+# NOTE: unlike the stock Dockerfile / Dockerfile.release / Dockerfile.hotfix,
+# this does NOT download a prebuilt binary from dl.min.io — that would ship the
+# UNPATCHED upstream MinIO. Here we compile the current repo tree so the image
+# contains the security-hardened fork.
+#
+# Version / ReleaseTag / CommitID are passed in as build-args (computed by the
+# CI job from the HEAD commit time + sha) so the build needs no .git inside the
+# context — .git is excluded by .dockerignore.
+#
+# The build stage runs on the native BUILDPLATFORM and cross-compiles with
+# GOARCH (CGO disabled), so multi-arch builds stay fast (no QEMU-emulated Go).
+
+FROM --platform=$BUILDPLATFORM golang:1.27-alpine AS build
+
+ARG TARGETOS
+ARG TARGETARCH
+ARG VERSION=DEVELOPMENT.GOGET
+ARG RELEASE=DEVELOPMENT.GOGET
+ARG COMMIT_ID=unknown
+ARG SHORT_COMMIT_ID=unknown
+ARG COPYRIGHT_YEAR=0000
+
+ENV GOPATH=/go
+ENV CGO_ENABLED=0
+
+RUN apk add -U --no-cache ca-certificates
+
+WORKDIR /src
+COPY . .
+
+RUN set -eux; \
+    LDFLAGS="-s -w \
+      -X github.com/minio/minio/cmd.Version=${VERSION} \
+      -X github.com/minio/minio/cmd.CopyrightYear=${COPYRIGHT_YEAR} \
+      -X github.com/minio/minio/cmd.ReleaseTag=${RELEASE} \
+      -X github.com/minio/minio/cmd.CommitID=${COMMIT_ID} \
+      -X github.com/minio/minio/cmd.ShortCommitID=${SHORT_COMMIT_ID} \
+      -X github.com/minio/minio/cmd.GOPATH=/go \
+      -X github.com/minio/minio/cmd.GOROOT=/usr/local/go"; \
+    GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" \
+      go build -tags kqueue -trimpath -ldflags "${LDFLAGS}" -o /go/bin/minio .
+
+# --- runtime image ---------------------------------------------------------
+FROM registry.access.redhat.com/ubi9/ubi-micro:latest
+
+ARG RELEASE=DEVELOPMENT.GOGET
+
+LABEL name="MinIO (pncuong-code fork)" \
+      vendor="pncuong-code" \
+      maintainer="pncuong-code" \
+      version="${RELEASE}" \
+      release="${RELEASE}" \
+      summary="Hardened MinIO fork — High Performance S3-compatible object storage." \
+      description="Community MinIO fork with backported security hardening (ANBM). Source: https://github.com/pncuong-code/minio" \
+      org.opencontainers.image.title="minio" \
+      org.opencontainers.image.source="https://github.com/pncuong-code/minio" \
+      org.opencontainers.image.version="${RELEASE}" \
+      org.opencontainers.image.licenses="AGPL-3.0-only"
+
+ENV MINIO_ACCESS_KEY_FILE=access_key \
+    MINIO_SECRET_KEY_FILE=secret_key \
+    MINIO_ROOT_USER_FILE=access_key \
+    MINIO_ROOT_PASSWORD_FILE=secret_key \
+    MINIO_KMS_SECRET_KEY_FILE=kms_master_key \
+    MINIO_CONFIG_ENV_FILE=config.env \
+    MC_CONFIG_DIR=/tmp/.mc
+
+RUN chmod -R 777 /usr/bin
+
+COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+COPY --from=build /go/bin/minio /usr/bin/minio
+COPY CREDITS /licenses/CREDITS
+COPY LICENSE /licenses/LICENSE
+COPY dockerscripts/docker-entrypoint.sh /usr/bin/docker-entrypoint.sh
+
+EXPOSE 9000
+VOLUME ["/data"]
+
+ENTRYPOINT ["/usr/bin/docker-entrypoint.sh"]
+CMD ["minio"]

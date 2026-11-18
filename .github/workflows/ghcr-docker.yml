@@ -1,0 +1,106 @@
+name: Publish Docker image (ghcr.io)
+
+# Builds the PATCHED MinIO fork from source (Dockerfile.ghcr) and pushes a
+# multi-arch image to GitHub Container Registry: ghcr.io/<owner>/minio.
+#
+# First publish note: a brand-new GHCR package is PRIVATE by default. Nothing
+# becomes public until the repo owner flips the package visibility to Public in
+# the package settings. So pushing this workflow does not expose anything yet.
+
+on:
+  push:
+    branches: [master]
+    paths-ignore:
+      - 'docs/**'
+      - '**/*.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: ghcr-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # need full history for commit time + sha
+
+      - name: Compute version from HEAD commit
+        id: ver
+        run: |
+          set -euo pipefail
+          COMMIT_TIME="$(git log -n1 --format=%cI HEAD)"
+          REL="$(date -u -d "$COMMIT_TIME" +%Y-%m-%dT%H-%M-%SZ)"
+          VERSION="$(date -u -d "$COMMIT_TIME" +%Y-%m-%dT%H:%M:%SZ)"
+          YEAR="$(date -u -d "$COMMIT_TIME" +%Y)"
+          FULL="$(git rev-parse HEAD)"
+          SHORT="$(git rev-parse --short HEAD)"
+          SHORT12="$(git rev-parse HEAD | cut -c1-12)"
+          TAG="RELEASE.${REL}.hotfix.${SHORT}"
+          {
+            echo "release_tag=${TAG}"
+            echo "version=${VERSION}"
+            echo "year=${YEAR}"
+            echo "commit=${FULL}"
+            echo "short=${SHORT}"
+            echo "short12=${SHORT12}"
+          } >> "$GITHUB_OUTPUT"
+          echo "Image version: ${TAG}"
+
+      - name: Lowercase image name
+        id: img
+        run: |
+          echo "name=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile.ghcr
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: false
+          tags: |
+            ${{ steps.img.outputs.name }}:latest
+            ${{ steps.img.outputs.name }}:${{ steps.ver.outputs.release_tag }}
+            ${{ steps.img.outputs.name }}:sha-${{ steps.ver.outputs.short }}
+          build-args: |
+            VERSION=${{ steps.ver.outputs.version }}
+            RELEASE=${{ steps.ver.outputs.release_tag }}
+            COMMIT_ID=${{ steps.ver.outputs.commit }}
+            SHORT_COMMIT_ID=${{ steps.ver.outputs.short12 }}
+            COPYRIGHT_YEAR=${{ steps.ver.outputs.year }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Summary
+        run: |
+          {
+            echo "### Docker image published"
+            echo ""
+            echo "- \`${{ steps.img.outputs.name }}:latest\`"
+            echo "- \`${{ steps.img.outputs.name }}:${{ steps.ver.outputs.release_tag }}\`"
+            echo "- \`${{ steps.img.outputs.name }}:sha-${{ steps.ver.outputs.short }}\`"
+            echo ""
+            echo "Platforms: linux/amd64, linux/arm64"
+          } >> "$GITHUB_STEP_SUMMARY"
