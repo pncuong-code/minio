@@ -89,8 +89,15 @@ const (
 )
 
 // setHeadGetRespHeaders - set any requested parameters as response headers.
-func setHeadGetRespHeaders(w http.ResponseWriter, reqParams url.Values) {
-	for k, v := range reqParams {
+// The response-* overrides are honored only on signed (or presigned) requests,
+// matching S3: on an anonymous request to a public-read object they would let a
+// caller force e.g. response-content-type=text/html and turn a stored object
+// into HTML served from this origin (stored XSS) or poison a shared cache.
+func setHeadGetRespHeaders(w http.ResponseWriter, r *http.Request) {
+	if getRequestAuthType(r) == authTypeAnonymous {
+		return
+	}
+	for k, v := range r.Form {
 		if header, ok := supportedHeadGetReqParams[strings.ToLower(k)]; ok {
 			w.Header()[header] = []string{strings.Join(v, ",")}
 		}
@@ -542,7 +549,7 @@ func (api objectAPIHandlers) getObjectHandler(ctx context.Context, objectAPI Obj
 		setPartsCountHeaders(w, objInfo)
 	}
 
-	setHeadGetRespHeaders(w, r.Form)
+	setHeadGetRespHeaders(w, r)
 
 	var iw io.Writer = w
 
@@ -976,7 +983,7 @@ func (api objectAPIHandlers) headObjectHandler(ctx context.Context, objectAPI Ob
 	}
 
 	// Set any additional requested response headers.
-	setHeadGetRespHeaders(w, r.Form)
+	setHeadGetRespHeaders(w, r)
 
 	// Successful response.
 	if rs != nil || opts.PartNumber > 0 {
@@ -1235,6 +1242,16 @@ func (api objectAPIHandlers) CopyObjectHandler(w http.ResponseWriter, r *http.Re
 	srcBucket, srcObject := path2BucketObject(cpSrcPath)
 	// If source object is empty or bucket is empty, reply back invalid copy source.
 	if srcObject == "" || srcBucket == "" {
+		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(ErrInvalidCopySource), r.URL)
+		return
+	}
+
+	// The copy-source bucket is taken from the client header and only checked by
+	// GetObject policy, so a user holding s3:GetObject on arn:aws:s3:::* could
+	// name a reserved bucket as the source and read IAM identities/config out of
+	// .minio.sys. The request2BucketObjectName reserved-bucket guard only covers
+	// the request bucket, not this header; block it explicitly here.
+	if isMinioMetaBucketName(srcBucket) || isMinioReservedBucket(srcBucket) {
 		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(ErrInvalidCopySource), r.URL)
 		return
 	}
@@ -2658,7 +2675,11 @@ func (api objectAPIHandlers) DeleteObjectHandler(w http.ResponseWriter, r *http.
 		return
 	}
 
-	if s3Error := checkRequestAuthType(ctx, r, policy.DeleteObjectAction, bucket, object); s3Error != ErrNone {
+	// Pass the versionId so authorizeRequest can enforce a Deny on
+	// s3:DeleteObjectVersion for a versioned delete; the multi-object delete
+	// path already does this via checkRequestAuthTypeWithVID.
+	deleteVersionID := r.URL.Query().Get(xhttp.VersionID)
+	if s3Error := checkRequestAuthTypeWithVID(ctx, r, policy.DeleteObjectAction, bucket, object, deleteVersionID); s3Error != ErrNone {
 		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(s3Error), r.URL)
 		return
 	}

@@ -106,8 +106,15 @@ func checkNewMultipartArgs(ctx context.Context, bucket, object string) error {
 }
 
 func checkMultipartObjectArgs(ctx context.Context, bucket, object, uploadID string) error {
-	_, err := base64.RawURLEncoding.DecodeString(uploadID)
-	if err != nil {
+	if _, err := base64.RawURLEncoding.DecodeString(uploadID); err != nil {
+		return MalformedUploadID{
+			UploadID: uploadID,
+		}
+	}
+	// The uploadID's trailing component becomes a filesystem path segment via
+	// getUploadIDDir -> pathJoin; reject a forged value that would traverse out
+	// of the multipart directory (e.g. base64("x./../../bucket/obj")).
+	if _, ok := uploadIDComponent(uploadID); !ok {
 		return MalformedUploadID{
 			UploadID: uploadID,
 		}

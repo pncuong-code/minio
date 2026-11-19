@@ -206,7 +206,7 @@ func (api objectAPIHandlers) getObjectInArchiveFileHandler(ctx context.Context, 
 	// s3zip does not allow ranges
 	w.Header().Del(xhttp.AcceptRanges)
 
-	setHeadGetRespHeaders(w, r.Form)
+	setHeadGetRespHeaders(w, r)
 
 	httpWriter := xioutil.WriteOnClose(w)
 
@@ -476,7 +476,7 @@ func (api objectAPIHandlers) headObjectInArchiveFileHandler(ctx context.Context,
 	w.Header().Del(xhttp.AcceptRanges)
 
 	// Set any additional requested response headers.
-	setHeadGetRespHeaders(w, r.Form)
+	setHeadGetRespHeaders(w, r)
 
 	// Successful response.
 	w.WriteHeader(http.StatusOK)

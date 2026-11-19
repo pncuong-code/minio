@@ -128,6 +128,14 @@ func calculateSeedSignature(r *http.Request, trailers bool) (cred auth.Credentia
 		return cred, "", "", time.Time{}, errCode
 	}
 
+	// Reject any x-amz-* header that the client did not sign. Unlike
+	// doesSignatureMatch, the streaming seed path did not check this, so an
+	// unsigned x-amz-tagging / x-amz-object-lock-* / x-amz-storage-class on a
+	// streaming-signed PUT would be honored without being covered by the signature.
+	if errUnsigned := checkUnsignedHeaders(extractedSignedHeaders, r); errUnsigned != ErrNone {
+		return cred, "", "", time.Time{}, errUnsigned
+	}
+
 	cred, _, errCode = checkKeyValid(r, signV4Values.Credential.accessKey)
 	if errCode != ErrNone {
 		return cred, "", "", time.Time{}, errCode
@@ -176,6 +184,10 @@ func calculateSeedSignature(r *http.Request, trailers bool) (cred auth.Credentia
 }
 
 const maxLineLength = 4 * humanize.KiByte // assumed <= bufio.defaultBufSize 4KiB
+
+// maxTrailerKVSize bounds the trailer value/signature section so a never-ending
+// trailer cannot grow the buffer without limit. Trailers carry small checksums.
+const maxTrailerKVSize = 1 << 20 // 1 MiB
 
 // lineTooLong is generated as chunk header is bigger than 4KiB.
 var errLineTooLong = errors.New("header line too long")
@@ -454,8 +466,15 @@ func (cr *s3ChunkedReader) readTrailers() error {
 			if err == io.EOF {
 				return io.ErrUnexpectedEOF
 			}
+			// A non-EOF error (timeout, reset, or ErrUnexpectedEOF from a
+			// truncated body) must stop the loop. Falling through would write a
+			// NUL byte and spin forever, growing valueBuffer until OOM.
+			return err
 		}
 		if v != '\r' {
+			if valueBuffer.Len() >= maxTrailerKVSize {
+				return errMalformedEncoding
+			}
 			valueBuffer.WriteByte(v)
 			continue
 		}
@@ -465,6 +484,7 @@ func (cr *s3ChunkedReader) readTrailers() error {
 			if err == io.EOF {
 				return io.ErrUnexpectedEOF
 			}
+			return err
 		}
 		if v != '\n' {
 			return errMalformedEncoding
@@ -480,8 +500,12 @@ func (cr *s3ChunkedReader) readTrailers() error {
 			if err == io.EOF {
 				return io.ErrUnexpectedEOF
 			}
+			return err
 		}
 		if v != '\r' {
+			if signatureBuffer.Len() >= maxTrailerKVSize {
+				return errMalformedEncoding
+			}
 			signatureBuffer.WriteByte(v)
 			continue
 		}
@@ -491,6 +515,7 @@ func (cr *s3ChunkedReader) readTrailers() error {
 			if err == io.EOF {
 				return io.ErrUnexpectedEOF
 			}
+			return err
 		}
 		if string(tmp[:]) != "\n\r\n" {
 			if cr.debug {

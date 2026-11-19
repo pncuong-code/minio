@@ -44,14 +44,39 @@ import (
 	"github.com/minio/sio"
 )
 
-func (er erasureObjects) getUploadIDDir(bucket, object, uploadID string) string {
+// uploadIDComponent decodes uploadID (base64 of "<deploymentID>.<uuid>x<nano>")
+// and returns the trailing path component joined under the multipart dir, plus
+// whether it is confined to a single path segment. The decoded value is used as
+// a filesystem path component, so a forged uploadID such as
+// base64("x./../../victimbucket/victimobj") must never escape the cache dir.
+func uploadIDComponent(uploadID string) (string, bool) {
 	uploadUUID := uploadID
-	uploadBytes, err := base64.RawURLEncoding.DecodeString(uploadID)
-	if err == nil {
-		slc := strings.SplitN(string(uploadBytes), ".", 2)
-		if len(slc) == 2 {
+	if b, err := base64.RawURLEncoding.DecodeString(uploadID); err == nil {
+		if slc := strings.SplitN(string(b), ".", 2); len(slc) == 2 {
 			uploadUUID = slc[1]
 		}
+	}
+	return uploadUUID, isSafePathComponent(uploadUUID)
+}
+
+// isSafePathComponent reports whether s stays within a single directory level,
+// i.e. joining it onto a base path cannot escape that base. An empty or "."
+// component is harmless (it resolves to the base dir and is rejected later as an
+// unknown upload id); only a separator or a ".." parent reference can traverse.
+func isSafePathComponent(s string) bool {
+	if strings.ContainsAny(s, `/\`) {
+		return false
+	}
+	return !strings.Contains(s, "..")
+}
+
+func (er erasureObjects) getUploadIDDir(bucket, object, uploadID string) string {
+	uploadUUID, ok := uploadIDComponent(uploadID)
+	if !ok {
+		// Defense in depth: checkMultipartObjectArgs rejects a traversing
+		// uploadID at the handler, but never let a forged value contribute a
+		// path component that escapes the multipart directory here either.
+		uploadUUID = "invalid-upload-id"
 	}
 	return pathJoin(er.getMultipartSHADir(bucket, object), uploadUUID)
 }

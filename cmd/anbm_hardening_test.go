@@ -12,6 +12,8 @@
 package cmd
 
 import (
+	"context"
+	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -273,5 +275,61 @@ func TestANBMSigV2CredentialRedaction(t *testing.T) {
 	}
 	if !strings.Contains(got, "*REDACTED*") || !strings.Contains(got, "Expires=1700000000") {
 		t.Fatalf("ANBM-025: unexpected trace redaction output: %q", got)
+	}
+}
+
+// ANBM-V4-030: a forged multipart uploadID must not traverse out of the
+// multipart directory when it becomes a filesystem path component.
+func TestANBMUploadIDRejectsTraversal(t *testing.T) {
+	enc := func(s string) string { return base64.RawURLEncoding.EncodeToString([]byte(s)) }
+	legit := enc("deploymentid." + mustGetUUID() + "x123456789")
+	if _, ok := uploadIDComponent(legit); !ok {
+		t.Fatalf("ANBM-V4-030: rejected a legit uploadID")
+	}
+	for _, bad := range []string{
+		enc("x./../../../victimbucket/victimobj"),
+		enc("dep.../../config"),
+		enc("dep." + "a/b"),
+		enc("dep..."), // component ".."
+	} {
+		if _, ok := uploadIDComponent(bad); ok {
+			t.Fatalf("ANBM-V4-030: accepted a traversing uploadID %q", bad)
+		}
+		if err := checkMultipartObjectArgs(context.Background(), "bucket", "obj", bad); err == nil {
+			t.Fatalf("ANBM-V4-030: checkMultipartObjectArgs allowed %q", bad)
+		}
+	}
+	for _, s := range []string{"..", "a/b", "a\\b", "..config", "../x"} {
+		if isSafePathComponent(s) {
+			t.Fatalf("ANBM-V4-030: isSafePathComponent accepted traversal %q", s)
+		}
+	}
+}
+
+// ANBM-V4-031: a presigned V2 request with a duplicate AWSAccessKeyId must be
+// rejected, so the verified identity cannot differ from the authorized one.
+func TestANBMSigV2DuplicateAccessKeyRejected(t *testing.T) {
+	r := httptest.NewRequest(http.MethodGet,
+		"/b/o?AWSAccessKeyId=victim&AWSAccessKeyId=attacker&Expires=9999999999&Signature=c2ln", nil)
+	if code := doesPresignV2SignatureMatch(r); code != ErrInvalidQueryParams {
+		t.Fatalf("ANBM-V4-031: duplicate AWSAccessKeyId not rejected, got %v", code)
+	}
+}
+
+// ANBM-V4-033: response-* overrides must be ignored on anonymous requests and
+// honored on signed ones.
+func TestANBMResponseOverrideOnlyWhenSigned(t *testing.T) {
+	anon := httptest.NewRequest(http.MethodGet, "/b/o?response-content-type=text/html", nil)
+	wa := httptest.NewRecorder()
+	setHeadGetRespHeaders(wa, anon)
+	if got := wa.Header().Get(xhttp.ContentType); got != "" {
+		t.Fatalf("ANBM-V4-033: anonymous response-content-type honored: %q", got)
+	}
+	signed := httptest.NewRequest(http.MethodGet, "/b/o?response-content-type=text/html", nil)
+	signed.Header.Set(xhttp.Authorization, signV4Algorithm+" Credential=a/b/c/s3/aws4_request, SignedHeaders=host, Signature=deadbeef")
+	ws := httptest.NewRecorder()
+	setHeadGetRespHeaders(ws, signed)
+	if got := ws.Header().Get(xhttp.ContentType); got != "text/html" {
+		t.Fatalf("ANBM-V4-033: signed response-content-type not honored: %q", got)
 	}
 }

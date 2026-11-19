@@ -134,6 +134,11 @@ func doesPresignV2SignatureMatch(r *http.Request) APIErrorCode {
 	}
 
 	// Extract the necessary values from presigned query, construct a list of new filtered queries.
+	// A duplicate auth parameter is rejected: this loop keeps the last value while
+	// the authorizing side (getReqAccessKeyV2) reads the first via r.Form.Get, so a
+	// repeated AWSAccessKeyId would let a request be verified under one identity but
+	// authorized under another. Reject repeats of the auth-critical parameters.
+	var sawAccessKey, sawSignature, sawExpires bool
 	for _, query := range unescapedQueries {
 		keyval := strings.SplitN(query, "=", 2)
 		if len(keyval) != 2 {
@@ -141,10 +146,22 @@ func doesPresignV2SignatureMatch(r *http.Request) APIErrorCode {
 		}
 		switch keyval[0] {
 		case xhttp.AmzAccessKeyID:
+			if sawAccessKey {
+				return ErrInvalidQueryParams
+			}
+			sawAccessKey = true
 			accessKey = keyval[1]
 		case xhttp.AmzSignatureV2:
+			if sawSignature {
+				return ErrInvalidQueryParams
+			}
+			sawSignature = true
 			gotSignature = keyval[1]
 		case xhttp.Expires:
+			if sawExpires {
+				return ErrInvalidQueryParams
+			}
+			sawExpires = true
 			expires = keyval[1]
 		default:
 			filteredQueries = append(filteredQueries, query)

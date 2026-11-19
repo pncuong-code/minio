@@ -303,6 +303,14 @@ func (api objectAPIHandlers) CopyObjectPartHandler(w http.ResponseWriter, r *htt
 		return
 	}
 
+	// Reject a reserved/meta bucket as the copy source; it is client-supplied via
+	// the header and only guarded by GetObject policy, so it must not be allowed
+	// to read .minio.sys (IAM identities/config) into a writable bucket.
+	if isMinioMetaBucketName(srcBucket) || isMinioReservedBucket(srcBucket) {
+		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(ErrInvalidCopySource), r.URL)
+		return
+	}
+
 	if vid != "" && vid != nullVersionID {
 		_, err := uuid.Parse(vid)
 		if err != nil {

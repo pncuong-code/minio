@@ -967,6 +967,12 @@ func (api objectAPIHandlers) PostPolicyBucketHandler(w http.ResponseWriter, r *h
 	)
 
 	maxParts := 1000
+	// Total in-memory budget for all non-file form fields, shared across parts.
+	// Declared outside the loop so it accumulates: a per-part reset let a POST
+	// with up to maxParts fields retain ~1 GiB before the signature is checked.
+	maxMemoryBytes := 2 * int64(10<<20)
+	// Bound the number of fan-out entries parsed before authentication.
+	const maxFanOutEntries = 10000
 	// Canonicalize the form values into http.Header.
 	formValues := make(http.Header)
 	var headerLen int64
@@ -998,8 +1004,8 @@ func (api objectAPIHandlers) PostPolicyBucketHandler(w http.ResponseWriter, r *h
 
 		// Multiple values for the same key (one map entry, longer slice) are cheaper
 		// than the same number of values for different keys (many map entries), but
-		// using a consistent per-value cost for overhead is simpler.
-		maxMemoryBytes := 2 * int64(10<<20)
+		// using a consistent per-value cost for overhead is simpler. maxMemoryBytes
+		// is the remaining shared budget (declared before the loop).
 		maxMemoryBytes -= int64(len(name))
 		maxMemoryBytes -= mapEntryOverhead
 		if maxMemoryBytes < 0 {
@@ -1018,6 +1024,13 @@ func (api objectAPIHandlers) PostPolicyBucketHandler(w http.ResponseWriter, r *h
 
 				// while the array contains values
 				for dec.More() {
+					if len(fanOutEntries) >= maxFanOutEntries {
+						part.Close()
+						apiErr := errorCodes.ToAPIErr(ErrMalformedPOSTRequest)
+						apiErr.Description = fmt.Sprintf("%s (%v)", apiErr.Description, multipart.ErrMessageTooLarge)
+						writeErrorResponse(ctx, w, apiErr, r.URL)
+						return
+					}
 					var m minio.PutObjectFanOutEntry
 					if err := dec.Decode(&m); err != nil {
 						part.Close()
