@@ -1,8 +1,6 @@
 module github.com/minio/minio/docs/debugging/xattr
 
-go 1.21
-
-toolchain go1.24.8
+go 1.27.4
 
 require (
 	github.com/olekukonko/tablewriter v0.0.5

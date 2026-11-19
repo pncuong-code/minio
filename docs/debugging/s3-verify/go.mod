@@ -1,6 +1,6 @@
 module github.com/minio/minio/docs/debugging/s3-verify
 
-go 1.26.0
+go 1.27.4
 
 require github.com/minio/minio-go/v7 v7.4.1
 
