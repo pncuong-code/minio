@@ -1,5 +1,10 @@
 # MinIO — pncuong-code hardened fork
 
+> **Unofficial fork — not affiliated with, authorized, or endorsed by MinIO, Inc.**
+> This image recompiles the AGPL v3.0 MinIO community edition from source with
+> backported security fixes. "MinIO" is a trademark of MinIO, Inc., used here only
+> to identify the upstream software. Official software and support: https://min.io
+
 High Performance, Kubernetes-native, **S3-compatible** object storage.
 
 This image is a **community MinIO fork with backported security hardening**. The

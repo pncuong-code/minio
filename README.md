@@ -1,7 +1,15 @@
-> [!NOTE]
-> **THIS REPOSITORY IS NO LONGER MAINTAINED.**
+> [!IMPORTANT]
+> **Unofficial fork.** This repository is a community fork maintained by `pncuong-code`
+> and is **not affiliated with, authorized, sponsored, or endorsed by MinIO, Inc.**
+> It recompiles the AGPL v3.0 MinIO community edition from source with backported
+> security fixes. "MinIO" is a trademark of MinIO, Inc. and is used here only
+> descriptively, to identify the software this fork is derived from.
+> For the official software, downloads and support, see <https://min.io>.
 >
-> **Alternatives:**
+> Fork source: <https://github.com/pncuong-code/minio>
+
+> [!NOTE]
+> The upstream community repository is no longer maintained. Official alternatives:
 > - **[AIStor Free](https://min.io/download)** — Full-featured, standalone edition for community use (free license)
 > - **[AIStor Enterprise](https://min.io/pricing)** — Distributed edition with commercial support
 
