@@ -124,7 +124,7 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Ensure Docker Hub repo is public
+      - name: Set Docker Hub visibility and description
         if: ${{ env.DOCKERHUB_USERNAME != '' }}
         env:
           DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -134,14 +134,18 @@ jobs:
             -d "{\"username\":\"${DOCKERHUB_USERNAME}\",\"password\":\"${DOCKERHUB_TOKEN}\"}" \
             https://hub.docker.com/v2/users/login/ | jq -r '.token // empty')"
           if [ -z "$JWT" ]; then
-            echo "::warning::Could not authenticate to Docker Hub API; repo visibility not changed (push still succeeded)."
+            echo "::warning::Could not authenticate to Docker Hub API; repo metadata not changed (push still succeeded)."
             exit 0
           fi
+          SHORT_DESC="Hardened MinIO fork — S3-compatible storage with backported security fixes (ANBM re-audit)."
+          FULL_DESC="$(cat dockerscripts/DOCKERHUB.md)"
+          BODY="$(jq -n --arg d "$SHORT_DESC" --arg f "$FULL_DESC" \
+            '{is_private:false, description:$d, full_description:$f}')"
           CODE="$(curl -s -o /dev/null -w '%{http_code}' -X PATCH \
             -H "Authorization: JWT ${JWT}" -H 'Content-Type: application/json' \
-            -d '{"is_private": false}' \
+            -d "$BODY" \
             "https://hub.docker.com/v2/repositories/${DOCKERHUB_USERNAME}/minio/")"
-          echo "Set repo public -> HTTP ${CODE}"
+          echo "Set repo public + description -> HTTP ${CODE}"
 
       - name: Summary
         run: |
