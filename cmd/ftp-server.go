@@ -144,10 +144,23 @@ func startFTPServer(args []string) {
 		name = "MinIO FTP(Secure) Server"
 	}
 
+	// Drop active-mode transfer commands (PORT/EPRT/LPRT): they let the client
+	// choose the data-connection target host, enabling FTP bounce / SSRF to
+	// internal services. MinIO FTP serves data over passive mode (PASV/EPSV).
+	commands := make(map[string]ftp.Command, len(ftp.DefaultCommands()))
+	for cmdName, cmd := range ftp.DefaultCommands() {
+		switch cmdName {
+		case "PORT", "EPRT", "LPRT":
+			continue
+		}
+		commands[cmdName] = cmd
+	}
+
 	ftpServer, err := ftp.NewServer(&ftp.Options{
 		Name:           name,
 		WelcomeMessage: fmt.Sprintf("Welcome to '%s' FTP Server Version='%s' License='%s'", MinioStoreName, MinioLicense, Version),
 		Driver:         NewFTPDriver(),
+		Commands:       commands,
 		Port:           port,
 		Perm:           ftp.NewSimplePerm("nobody", "nobody"),
 		TLS:            tls,

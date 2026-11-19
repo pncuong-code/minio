@@ -99,6 +99,13 @@ const (
 	stsLDAPLoginBurst         = 10
 	stsLDAPLoginEntryTTL      = 15 * time.Minute
 	stsLDAPLoginRetryAfterSec = int((time.Minute / stsLDAPLoginBurst) / time.Second)
+
+	// Bound the per-key size and the number of entries each limiter map can
+	// hold. The map keys are caller-controlled (form field / source header) and
+	// otherwise unbounded, so these caps keep an unauthenticated caller from
+	// amplifying a large value into unbounded heap.
+	stsLDAPLoginMaxKeyLen  = 256
+	stsLDAPLoginMaxEntries = 4096
 )
 
 var (
@@ -309,14 +316,26 @@ func newSTSLDAPLoginKeyLimiterSet(refillEvery time.Duration, burst int, ttl time
 	}
 }
 
+// boundLimiterKey caps the memory a single rate-limiter map key can occupy.
+// Values longer than the cap are replaced by their fixed-size hash so a caller
+// cannot drive map growth with an oversized username or forged source header
+// while keeping distinct values on distinct keys.
+func boundLimiterKey(s string) string {
+	if len(s) <= stsLDAPLoginMaxKeyLen {
+		return s
+	}
+	sum := sha256.Sum256([]byte(s))
+	return string(sum[:])
+}
+
 func (l *stsLDAPLoginRateLimiter) Allow(sourceIP, username string) bool {
 	now := UTCNow()
-	if sourceIP != "" && !l.source.Allow(now, sourceIP) {
+	if sourceIP != "" && !l.source.Allow(now, boundLimiterKey(sourceIP)) {
 		return false
 	}
 
 	username = strings.ToLower(strings.TrimSpace(username))
-	if username != "" && !l.user.Allow(now, username) {
+	if username != "" && !l.user.Allow(now, boundLimiterKey(username)) {
 		return false
 	}
 
@@ -334,6 +353,16 @@ func (l *stsLDAPLoginKeyLimiterSet) Allow(now time.Time, key string) bool {
 
 	entry, ok := l.entries[key]
 	if !ok {
+		if len(l.entries) >= stsLDAPLoginMaxEntries {
+			// Map is saturated. Force a cleanup pass; if it is still full, deny
+			// the new key rather than grow the map without bound. Callers already
+			// tracked keep their limiter entries.
+			l.cleanup(now)
+			l.lastCleanup = now
+			if len(l.entries) >= stsLDAPLoginMaxEntries {
+				return false
+			}
+		}
 		entry = &stsLDAPLoginKeyLimiter{
 			limiter:  rate.NewLimiter(rate.Every(l.refillEvery), l.burst),
 			lastSeen: now,
@@ -1032,6 +1061,15 @@ func (sts *stsAPIHandlers) AssumeRoleWithCertificate(w http.ResponseWriter, r *h
 	// Group mapping is not possible with standard X.509 certificates.
 	if certificate.Subject.CommonName == "" {
 		writeSTSErrorResponse(ctx, w, ErrSTSMissingParameter, errors.New("certificate subject CN cannot be empty"))
+		return
+	}
+
+	// V5-065: the CN maps directly to a policy name and MinIO treats a
+	// comma-separated value as a SET of policies, so a CN such as
+	// "user,consoleAdmin" would attach the second policy too. Reject any CN that
+	// could expand to more than one policy.
+	if strings.ContainsAny(certificate.Subject.CommonName, ", \t") {
+		writeSTSErrorResponse(ctx, w, ErrSTSInvalidParameterValue, errors.New("certificate subject CN must not contain a comma or whitespace"))
 		return
 	}
 

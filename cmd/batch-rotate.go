@@ -457,8 +457,8 @@ func (r *BatchJobKeyRotateV1) Validate(ctx context.Context, job BatchJobRequest,
 		return errInvalidArgument
 	}
 
-	if r.Bucket == "" {
-		return errInvalidArgument
+	if err := batchValidateBucket(r.Bucket); err != nil {
+		return err
 	}
 
 	if _, err := o.GetBucketInfo(ctx, r.Bucket, BucketOptions{}); err != nil {

@@ -52,7 +52,16 @@ type SelectStatement struct {
 
 // ParseSelectStatement - parses a select query from the given string
 // and analyzes it.
+// maxSelectExpressionSize bounds the SQL expression, matching the Amazon S3
+// Select limit. It also keeps a deeply-nested expression from driving unbounded
+// parser recursion into a fatal, unrecoverable stack overflow (V5-060).
+const maxSelectExpressionSize = 256 << 10
+
 func ParseSelectStatement(s string) (stmt SelectStatement, err error) {
+	if len(s) > maxSelectExpressionSize {
+		return stmt, errQueryParseFailure(fmt.Errorf("SQL expression exceeds the maximum allowed size of %d bytes", maxSelectExpressionSize))
+	}
+
 	var selectAST Select
 	err = SQLParser.ParseString(s, &selectAST)
 	if err != nil {

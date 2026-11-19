@@ -93,14 +93,39 @@ func (r *BatchJobReplicateV1) RedactSensitive() {
 	if r.Target.Creds.SessionToken != "" {
 		r.Target.Creds.SessionToken = redactedText
 	}
+	if r.Source.Creds.SecretKey != "" {
+		r.Source.Creds.SecretKey = redactedText
+	}
+	if r.Source.Creds.SessionToken != "" {
+		r.Source.Creds.SessionToken = redactedText
+	}
+	if r.Flags.Notify.Token != "" {
+		r.Flags.Notify.Token = redactedText
+	}
 }
 
 // RedactSensitive will redact any sensitive information in b.
-func (r *BatchJobKeyRotateV1) RedactSensitive() {}
+func (r *BatchJobKeyRotateV1) RedactSensitive() {
+	if r == nil {
+		return
+	}
+	if r.Encryption.Key != "" {
+		r.Encryption.Key = redactedText
+	}
+	if r.Flags.Notify.Token != "" {
+		r.Flags.Notify.Token = redactedText
+	}
+}
 
 func notifyEndpoint(ctx context.Context, ri *batchJobInfo, endpoint, token string) error {
 	if endpoint == "" {
 		return nil
+	}
+
+	// V5-056: only http/https, and never follow redirects, so a notification
+	// endpoint cannot bounce (302) the request to loopback/metadata services.
+	if u, perr := url.Parse(endpoint); perr != nil || (u.Scheme != "http" && u.Scheme != "https") {
+		return fmt.Errorf("invalid batch job notification endpoint")
 	}
 
 	buf, err := json.Marshal(ri)
@@ -121,7 +146,12 @@ func notifyEndpoint(ctx context.Context, ri *batchJobInfo, endpoint, token strin
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	clnt := http.Client{Transport: getRemoteInstanceTransport()}
+	clnt := http.Client{
+		Transport: getRemoteInstanceTransport(),
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 	resp, err := clnt.Do(req)
 	if err != nil {
 		return err
@@ -577,6 +607,15 @@ func toObjectInfo(bucket, object string, objInfo minio.ObjectInfo) ObjectInfo {
 
 	maps.Copy(oi.UserDefined, objInfo.UserMetadata)
 
+	// V5-063: the source is a remote cluster; reserved internal metadata
+	// (X-Minio-Internal-*) is normally stripped at the HTTP edge but this path
+	// writes straight to the object layer, so drop it here.
+	for k := range oi.UserDefined {
+		if strings.HasPrefix(k, ReservedMetadataPrefix) || strings.HasPrefix(k, ReservedMetadataPrefixLower) {
+			delete(oi.UserDefined, k)
+		}
+	}
+
 	return oi
 }
 
@@ -774,6 +813,66 @@ const (
 
 func getJobPath(job BatchJobRequest) string {
 	return pathJoin(batchJobPrefix, job.ID)
+}
+
+// batchValidateBucket rejects meta/reserved buckets as a batch job source or
+// target. Batch workers run with server privileges and reach the object layer
+// directly, bypassing the reserved-bucket guard enforced at the HTTP edge, so
+// each job definition must reject these buckets itself (otherwise a job can read
+// or overwrite .minio.sys IAM/config).
+func batchValidateBucket(bucket string) error {
+	if bucket == "" || isMinioMetaBucketName(bucket) || isMinioReservedBucket(bucket) {
+		return errInvalidArgument
+	}
+	return nil
+}
+
+// validateBatchJobID rejects a caller-supplied batch job ID that does not match
+// the server-generated format "<type>-<id><sep><index>". It is the single guard
+// that keeps a caller-controlled ID from escaping the batch-jobs prefix (e.g.
+// "../config/iam") before it is joined into an object path and used with a
+// recursive delete. The traversal rejection alone closes the escape; the format
+// check is defense in depth, and must accept every ID the generator produces.
+func validateBatchJobID(id string) error {
+	if id == "" {
+		return errInvalidArgument
+	}
+	// No path separators or traversal on any platform.
+	if strings.ContainsAny(id, `/\`) || strings.Contains(id, "..") {
+		return errInvalidArgument
+	}
+	i := strings.IndexByte(id, '-')
+	if i <= 0 {
+		return errInvalidArgument
+	}
+	switch madmin.BatchJobType(id[:i]) {
+	case madmin.BatchJobReplicate, madmin.BatchJobKeyRotate, madmin.BatchJobExpire:
+	default:
+		return errInvalidArgument
+	}
+	rest := id[i+1:]
+	sep := strings.IndexAny(rest, ":_")
+	if sep <= 0 || sep == len(rest)-1 {
+		return errInvalidArgument
+	}
+	for _, c := range rest[:sep] { // short uuid: alphanumeric
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) {
+			return errInvalidArgument
+		}
+	}
+	idx := rest[sep+1:] // proxy endpoint index: optional '-' then digits (can be -1)
+	if idx[0] == '-' {
+		idx = idx[1:]
+	}
+	if idx == "" {
+		return errInvalidArgument
+	}
+	for _, c := range idx {
+		if c < '0' || c > '9' {
+			return errInvalidArgument
+		}
+	}
+	return nil
 }
 
 func (ri *batchJobInfo) getJobReportPath() (string, error) {
@@ -1375,8 +1474,11 @@ func (r *BatchJobReplicateV1) Validate(ctx context.Context, job BatchJobRequest,
 		return errInvalidArgument
 	}
 
-	if r.Source.Bucket == "" || r.Target.Bucket == "" {
-		return errInvalidArgument
+	if err := batchValidateBucket(r.Source.Bucket); err != nil {
+		return err
+	}
+	if err := batchValidateBucket(r.Target.Bucket); err != nil {
+		return err
 	}
 
 	var isRemoteToLocal bool
@@ -1664,8 +1766,8 @@ func (a adminAPIHandlers) BatchJobStatus(w http.ResponseWriter, r *http.Request)
 	}
 
 	jobID := r.Form.Get("jobId")
-	if jobID == "" {
-		writeErrorResponseJSON(ctx, w, toAPIError(ctx, errInvalidArgument), r.URL)
+	if err := validateBatchJobID(jobID); err != nil {
+		writeErrorResponseJSON(ctx, w, toAPIError(ctx, err), r.URL)
 		return
 	}
 
@@ -1715,8 +1817,8 @@ func (a adminAPIHandlers) DescribeBatchJob(w http.ResponseWriter, r *http.Reques
 	}
 
 	jobID := r.Form.Get("jobId")
-	if jobID == "" {
-		writeErrorResponseJSON(ctx, w, toAPIError(ctx, errInvalidArgument), r.URL)
+	if err := validateBatchJobID(jobID); err != nil {
+		writeErrorResponseJSON(ctx, w, toAPIError(ctx, err), r.URL)
 		return
 	}
 
@@ -1796,6 +1898,48 @@ func (a adminAPIHandlers) StartBatchJob(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// V5-051: admin rights to start a batch job do not substitute for the
+	// object-level S3 permission the job exercises with server privileges.
+	// Require a non-owner initiator to hold the matching S3 action on the local
+	// bucket, so a delegated admin cannot replicate/expire/rotate a bucket they
+	// have no S3 rights to.
+	if creds.AccessKey != globalActiveCred.AccessKey && creds.ParentUser != globalActiveCred.AccessKey {
+		cond := getConditionValues(r, "", creds)
+		allowS3 := func(action policy.Action, bucket string) bool {
+			if bucket == "" {
+				return true
+			}
+			return globalIAMSys.IsAllowed(policy.Args{
+				AccountName:     creds.AccessKey,
+				Groups:          creds.Groups,
+				Action:          action,
+				BucketName:      bucket,
+				ConditionValues: cond,
+				IsOwner:         false,
+				Claims:          creds.Claims,
+			})
+		}
+		ok := true
+		switch {
+		case job.Replicate != nil:
+			// The local bucket is the source for local->remote and the target
+			// for remote->local.
+			if job.Replicate.Source.Endpoint != "" {
+				ok = allowS3(policy.PutObjectAction, job.Replicate.Target.Bucket)
+			} else {
+				ok = allowS3(policy.GetObjectAction, job.Replicate.Source.Bucket)
+			}
+		case job.Expire != nil:
+			ok = allowS3(policy.DeleteObjectAction, job.Expire.Bucket)
+		case job.KeyRotate != nil:
+			ok = allowS3(policy.GetObjectAction, job.KeyRotate.Bucket) && allowS3(policy.PutObjectAction, job.KeyRotate.Bucket)
+		}
+		if !ok {
+			writeErrorResponseJSON(ctx, w, errorCodes.ToAPIErr(ErrAccessDenied), r.URL)
+			return
+		}
+	}
+
 	job.ID = fmt.Sprintf("%s-%s%s%d", job.Type(), shortuuid.New(), getKeySeparator(), GetProxyEndpointLocalIndex(globalProxyEndpoints))
 	job.User = user
 	job.Started = time.Now()
@@ -1834,8 +1978,8 @@ func (a adminAPIHandlers) CancelBatchJob(w http.ResponseWriter, r *http.Request)
 	}
 
 	jobID := r.Form.Get("id")
-	if jobID == "" {
-		writeErrorResponseJSON(ctx, w, toAPIError(ctx, errInvalidArgument), r.URL)
+	if err := validateBatchJobID(jobID); err != nil {
+		writeErrorResponseJSON(ctx, w, toAPIError(ctx, err), r.URL)
 		return
 	}
 

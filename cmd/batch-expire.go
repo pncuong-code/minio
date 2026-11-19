@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"runtime"
 	"strconv"
 	"time"
@@ -319,6 +320,11 @@ func (r BatchJobExpire) Notify(ctx context.Context, body io.Reader) error {
 		return nil
 	}
 
+	// V5-056: only http/https, and never follow redirects.
+	if u, perr := url.Parse(r.NotificationCfg.Endpoint); perr != nil || (u.Scheme != "http" && u.Scheme != "https") {
+		return fmt.Errorf("invalid batch job notification endpoint")
+	}
+
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
@@ -331,7 +337,12 @@ func (r BatchJobExpire) Notify(ctx context.Context, body io.Reader) error {
 		req.Header.Set("Authorization", r.NotificationCfg.Token)
 	}
 
-	clnt := http.Client{Transport: getRemoteInstanceTransport()}
+	clnt := http.Client{
+		Transport: getRemoteInstanceTransport(),
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 	resp, err := clnt.Do(req)
 	if err != nil {
 		return err
@@ -427,7 +438,28 @@ func batchObjsForDelete(ctx context.Context, r *BatchJobExpire, ri *batchJobInfo
 			toExpireAll := make([]expireObjInfo, 0, len(toExpire))
 			toDel := make([]ObjectToDelete, 0, len(toExpire))
 			oiCache := newObjInfoCache()
+
+			// Honor object lock: a batch expire job reaches the object layer
+			// directly and would otherwise purge versions under active retention
+			// or legal hold. Mirror lifecycle/ILM, which skips locked versions.
+			rcfg, _ := globalBucketObjectLockSys.Get(r.Bucket)
+
 			for _, exp := range toExpire {
+				if rcfg.LockEnabled {
+					if exp.ExpireAll {
+						// A prefix delete of every version of an object cannot be
+						// made safe on a lock-enabled bucket; record as not
+						// deleted and skip rather than purge locked versions.
+						batchLogIf(ctx, fmt.Errorf("skipping expire of all versions of %s/%s: bucket has object lock enabled", r.Bucket, exp.Name))
+						ri.trackMultipleObjectVersions(exp, false)
+						continue
+					}
+					if enforceRetentionForDeletion(ctx, exp.ObjectInfo) {
+						batchLogIf(ctx, fmt.Errorf("skipping expire of object-locked %s/%s versionID=%s", r.Bucket, exp.Name, exp.VersionID))
+						ri.trackCurrentBucketObject(r.Bucket, exp.ObjectInfo, false, 1)
+						continue
+					}
+				}
 				if exp.ExpireAll {
 					toExpireAll = append(toExpireAll, exp)
 					continue
@@ -795,6 +827,14 @@ func (r *BatchJobExpire) Validate(ctx context.Context, job BatchJobRequest, o Ob
 		return batchExpireJobError{
 			Code:           "InvalidArgument",
 			Description:    "Bucket argument missing",
+			HTTPStatusCode: http.StatusBadRequest,
+		}
+	}
+
+	if err := batchValidateBucket(r.Bucket); err != nil {
+		return batchExpireJobError{
+			Code:           "InvalidArgument",
+			Description:    "The specified bucket cannot be used for a batch job",
 			HTTPStatusCode: http.StatusBadRequest,
 		}
 	}

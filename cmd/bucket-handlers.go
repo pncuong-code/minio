@@ -463,6 +463,11 @@ func (api objectAPIHandlers) DeleteMultipleObjectsHandler(w http.ResponseWriter,
 	// Make sure to update context to print ObjectNames for multi objects.
 	ctx = updateReqContext(ctx, objects...)
 
+	// V5-049: this handler does not load each object's real tags, so a
+	// client-supplied X-Amz-Tagging header must not survive into the per-object
+	// authz checks where it would be read as s3:ExistingObjectTag.
+	r.Header.Del(xhttp.AmzObjectTagging)
+
 	// Call checkRequestAuthType to populate ReqInfo.AccessKey before GetBucketInfo()
 	// Ignore errors here to preserve the S3 error behavior of GetBucketInfo()
 	checkRequestAuthType(ctx, r, policy.DeleteObjectAction, bucket, "")
@@ -760,6 +765,12 @@ func (api objectAPIHandlers) PutBucketHandler(w http.ResponseWriter, r *http.Req
 		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(s3Error), r.URL)
 		return
 	}
+
+	// force-create is an internal/admin affordance (site replication, admin
+	// bucket import) that overwrites an existing bucket. It must not be driven
+	// by an ordinary s3:CreateBucket principal over the S3 header, so honor it
+	// only for the account owner.
+	forceCreate = forceCreate && owner
 
 	if objectLockEnabled {
 		// Creating a bucket with locking requires the user having more permissions
@@ -1949,7 +1960,7 @@ func (api objectAPIHandlers) PutBucketTaggingHandler(w http.ResponseWriter, r *h
 		return
 	}
 
-	tags, err := tags.ParseBucketXML(io.LimitReader(r.Body, r.ContentLength))
+	tags, err := tags.ParseBucketXML(io.LimitReader(r.Body, maxBucketTaggingConfigSize))
 	if err != nil {
 		apiErr := errorCodes.ToAPIErr(ErrMalformedXML)
 		apiErr.Description = err.Error()

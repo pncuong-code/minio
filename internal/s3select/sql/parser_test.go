@@ -19,6 +19,7 @@ package sql
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 
 	"github.com/alecthomas/participle"
@@ -391,5 +392,17 @@ func TestParseSelectStatement(t *testing.T) {
 	}
 	if exp.selectAST.Expression.Expressions[2].As != "mytest" {
 		t.Fatalf("parse alias sql error: %s not equal %s", exp.selectAST.Expression.Expressions[2].As, err)
+	}
+}
+
+// ANBM-V5-060: an oversized SQL expression must be rejected before parsing, so
+// a deeply-nested expression cannot drive the parser into a fatal stack overflow.
+func TestANBMSelectExpressionSizeLimited(t *testing.T) {
+	big := "SELECT * FROM S3Object WHERE " + strings.Repeat("(", maxSelectExpressionSize)
+	if _, err := ParseSelectStatement(big); err == nil {
+		t.Fatal("ANBM-V5-060: oversized SQL expression was accepted")
+	}
+	if _, err := ParseSelectStatement("SELECT * FROM S3Object"); err != nil {
+		t.Fatalf("ANBM-V5-060: rejected a small valid statement: %v", err)
 	}
 }

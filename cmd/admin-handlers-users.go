@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"net"
 	"net/http"
 	"os"
 	"slices"
@@ -38,6 +39,7 @@ import (
 	"github.com/minio/madmin-go/v3"
 	"github.com/minio/minio/internal/auth"
 	"github.com/minio/minio/internal/config/dns"
+	"github.com/minio/minio/internal/handlers"
 	"github.com/minio/minio/internal/logger"
 	"github.com/minio/mux"
 	xldap "github.com/minio/pkg/v3/ldap"
@@ -853,6 +855,13 @@ func (a adminAPIHandlers) UpdateServiceAccount(w http.ResponseWriter, r *http.Re
 		IsOwner:         owner,
 		Claims:          cred.Claims,
 	}) {
+		writeErrorResponseJSON(ctx, w, errorCodes.ToAPIErr(ErrAccessDenied), r.URL)
+		return
+	}
+
+	// A service account parented by the root account carries root-equivalent
+	// privileges; only the owner may modify it (e.g. reset its secret key).
+	if svcAccount.ParentUser == globalActiveCred.AccessKey && !owner {
 		writeErrorResponseJSON(ctx, w, errorCodes.ToAPIErr(ErrAccessDenied), r.URL)
 		return
 	}
@@ -2244,6 +2253,18 @@ func (a adminAPIHandlers) ExportIAM(w http.ResponseWriter, r *http.Request) {
 		writeErrorResponseJSON(ctx, w, errorCodes.ToAPIErr(ErrServerNotInitialized), r.URL)
 		return
 	}
+
+	// V5-055: the export streams the secret key of every user and service
+	// account, and the madmin client receives the zip unencrypted. Refuse to
+	// ship it over a plaintext connection to a non-loopback peer; TLS is the
+	// only transport protection here.
+	if !globalIsTLS {
+		if ip := net.ParseIP(handlers.GetSourceIP(r)); ip == nil || !ip.IsLoopback() {
+			writeErrorResponseJSON(ctx, w, errorCodes.ToAPIErr(ErrInsecureClientRequest), r.URL)
+			return
+		}
+	}
+
 	// Initialize a zip writer which will provide a zipped content
 	// of bucket metadata
 	zipWriter := zip.NewWriter(w)
@@ -2977,6 +2998,14 @@ func commonAddServiceAccount(r *http.Request, ldap bool) (context.Context, auth.
 		Claims:          cred.Claims,
 		DenyOnly:        denyOnly,
 	}) {
+		return ctx, auth.Credentials{}, newServiceAccountOpts{}, madmin.AddServiceAccountReq{}, "", errorCodes.ToAPIErr(ErrAccessDenied)
+	}
+
+	// A service account whose parent is the root account inherits root
+	// (owner) privileges. Only the owner may create one; otherwise a principal
+	// holding admin:CreateServiceAccount could mint root-equivalent credentials
+	// for the root account (confused deputy / privilege escalation).
+	if targetUser == globalActiveCred.AccessKey && !owner {
 		return ctx, auth.Credentials{}, newServiceAccountOpts{}, madmin.AddServiceAccountReq{}, "", errorCodes.ToAPIErr(ErrAccessDenied)
 	}
 

@@ -160,12 +160,22 @@ func (r *Config) Validate(ctx context.Context, arn arn.ARN, token, accessToken, 
 	mclaims := jwtgo.MapClaims(claims)
 	jwtToken, err := jp.ParseWithClaims(token, &mclaims, keyFuncCallback)
 	if err != nil {
-		// Re-populate the public key in-case the JWKS
-		// pubkeys are refreshed
-		if err = r.PopulatePublicKey(arn); err != nil {
-			return err
+		// V5-059: only refresh the JWKS when the token references a kid we do
+		// not currently hold. Refetching on every parse error (expired token,
+		// bad signature, ...) lets an anonymous caller drive one JWKS HTTP GET
+		// per invalid token.
+		refetch := false
+		if unv, _, uerr := jp.ParseUnverified(token, jwtgo.MapClaims{}); uerr == nil {
+			if kid, ok := unv.Header["kid"].(string); ok && r.pubKeys.get(kid) == nil {
+				refetch = true
+			}
 		}
-		jwtToken, err = jp.ParseWithClaims(token, &mclaims, keyFuncCallback)
+		if refetch {
+			if perr := r.PopulatePublicKey(arn); perr != nil {
+				return perr
+			}
+			jwtToken, err = jp.ParseWithClaims(token, &mclaims, keyFuncCallback)
+		}
 		if err != nil {
 			return err
 		}
@@ -215,6 +225,18 @@ func (r *Config) Validate(ctx context.Context, arn arn.ARN, token, accessToken, 
 		}
 	}
 
+	// V5-058: bind the token to this provider's issuer. The provider advertises
+	// its issuer in its discovery document and a conforming id_token's `iss`
+	// MUST equal it (OIDC Core 3.1.3.7), so a token minted by a different issuer
+	// that happens to share a signing key id / audience cannot be accepted for
+	// this provider. Only enforced when the issuer is known from discovery.
+	if pCfg.DiscoveryDoc.Issuer != "" {
+		issValues, ok := policy.GetValuesFromClaims(mclaims, "iss")
+		if !ok || !issValues.Contains(pCfg.DiscoveryDoc.Issuer) {
+			return errors.New("STS JWT Token has `iss` claim that does not match the configured provider issuer")
+		}
+	}
+
 	return nil
 }
 
@@ -229,6 +251,15 @@ func (r *Config) updateUserinfoClaims(ctx context.Context, arn arn.ARN, accessTo
 		uclaims, err := pCfg.UserInfo(ctx, accessToken, r.transport)
 		if err != nil {
 			return err
+		}
+		// V5-054: bind the access_token's userinfo response to the id_token
+		// subject. Without this, an access_token for a different principal (e.g.
+		// one leaked from another app on the same IdP, carrying higher-privilege
+		// claims) could inject claims under this login.
+		if usub, ok := uclaims["sub"].(string); ok && usub != "" {
+			if isub, _ := claims["sub"].(string); isub != "" && usub != isub {
+				return errors.New("OpenID: userinfo subject does not match id_token subject")
+			}
 		}
 		for k, v := range uclaims {
 			if _, ok := claims[k]; !ok { // only add to claims not update it.

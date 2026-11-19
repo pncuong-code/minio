@@ -19,6 +19,7 @@ package cmd
 
 import (
 	"encoding/xml"
+	"io"
 	"net/http"
 	"strconv"
 	"time"
@@ -69,7 +70,7 @@ func (api objectAPIHandlers) PutBucketLifecycleHandler(w http.ResponseWriter, r 
 		return
 	}
 
-	bucketLifecycle, err := lifecycle.ParseLifecycleConfigWithID(r.Body)
+	bucketLifecycle, err := lifecycle.ParseLifecycleConfigWithID(io.LimitReader(r.Body, maxBucketLifecycleConfigSize))
 	if err != nil {
 		writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
 		return

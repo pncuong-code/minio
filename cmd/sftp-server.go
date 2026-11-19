@@ -26,6 +26,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/minio/madmin-go/v3"
@@ -134,13 +135,82 @@ func sshPasswordAuth(c ssh.ConnMetadata, pass []byte) (*ssh.Permissions, error) 
 	return authenticateSSHConnection(c, nil, pass)
 }
 
+// V5-057: for public-key based LDAP auth, the temporary credential must be
+// committed (stored in IAM + broadcast to site replication) only AFTER the
+// client proves possession of the private key. PublicKeyCallback runs during
+// the (unverified) key-query phase, so the commit is deferred to
+// VerifiedPublicKeyCallback. The pending credential is stashed per connection
+// session in the meantime.
+const sftpMaxPendingLDAPCreds = 8192
+
+var sftpPendingLDAPCreds = struct {
+	sync.Mutex
+	m map[string]auth.Credentials
+}{m: make(map[string]auth.Credentials)}
+
+func stashPendingLDAPCred(sessionID string, cred auth.Credentials) {
+	sftpPendingLDAPCreds.Lock()
+	defer sftpPendingLDAPCreds.Unlock()
+	if _, ok := sftpPendingLDAPCreds.m[sessionID]; !ok && len(sftpPendingLDAPCreds.m) >= sftpMaxPendingLDAPCreds {
+		// Bound memory against connections that pass the key-query phase but
+		// never complete verification: drop an arbitrary stale entry.
+		for k := range sftpPendingLDAPCreds.m {
+			delete(sftpPendingLDAPCreds.m, k)
+			break
+		}
+	}
+	sftpPendingLDAPCreds.m[sessionID] = cred
+}
+
+func popPendingLDAPCred(sessionID string) (auth.Credentials, bool) {
+	sftpPendingLDAPCreds.Lock()
+	defer sftpPendingLDAPCreds.Unlock()
+	cred, ok := sftpPendingLDAPCreds.m[sessionID]
+	if ok {
+		delete(sftpPendingLDAPCreds.m, sessionID)
+	}
+	return cred, ok
+}
+
+// commitLDAPTempUser stores the LDAP-derived temporary credential and notifies
+// site replication.
+func commitLDAPTempUser(cred auth.Credentials) error {
+	updatedAt, err := globalIAMSys.SetTempUser(context.Background(), cred.AccessKey, cred, "")
+	if err != nil {
+		return err
+	}
+
+	replLogIf(context.Background(), globalSiteReplicationSys.IAMChangeHook(context.Background(), madmin.SRIAMItem{
+		Type: madmin.SRIAMItemSTSAcc,
+		STSCredential: &madmin.SRSTSCredential{
+			AccessKey:    cred.AccessKey,
+			SecretKey:    cred.SecretKey,
+			SessionToken: cred.SessionToken,
+			ParentUser:   cred.ParentUser,
+		},
+		UpdatedAt: updatedAt,
+	}))
+	return nil
+}
+
+// sshVerifiedPubKeyAuth commits any credential that was deferred by
+// PublicKeyCallback, now that the public-key signature has been verified.
+func sshVerifiedPubKeyAuth(c ssh.ConnMetadata, _ ssh.PublicKey, permissions *ssh.Permissions, _ string) (*ssh.Permissions, error) {
+	if cred, ok := popPendingLDAPCred(string(c.SessionID())); ok {
+		if err := commitLDAPTempUser(cred); err != nil {
+			return nil, err
+		}
+	}
+	return permissions, nil
+}
+
 func authenticateSSHConnection(c ssh.ConnMetadata, key ssh.PublicKey, pass []byte) (*ssh.Permissions, error) {
 	user, found := strings.CutSuffix(c.User(), "=ldap")
 	if found {
 		if !globalIAMSys.LDAPConfig.Enabled() {
 			return nil, errSFTPLDAPNotEnabled
 		}
-		return processLDAPAuthentication(key, pass, user)
+		return processLDAPAuthentication(c, key, pass, user)
 	}
 
 	user, found = strings.CutSuffix(c.User(), "=svc")
@@ -149,7 +219,7 @@ func authenticateSSHConnection(c ssh.ConnMetadata, key ssh.PublicKey, pass []byt
 	}
 
 	if globalIAMSys.LDAPConfig.Enabled() {
-		perms, _ := processLDAPAuthentication(key, pass, user)
+		perms, _ := processLDAPAuthentication(c, key, pass, user)
 		if perms != nil {
 			return perms, nil
 		}
@@ -190,9 +260,13 @@ internalAuth:
 	}, nil
 }
 
-func processLDAPAuthentication(key ssh.PublicKey, pass []byte, user string) (perms *ssh.Permissions, err error) {
+func processLDAPAuthentication(c ssh.ConnMetadata, key ssh.PublicKey, pass []byte, user string) (perms *ssh.Permissions, err error) {
 	var lookupResult *xldap.DNSearchResult
 	var targetGroups []string
+
+	// Public-key auth proves possession only after the signature is verified
+	// (VerifiedPublicKeyCallback), so the commit is deferred in that case.
+	viaKey := pass == nil && key != nil
 
 	if pass == nil && key == nil {
 		return nil, errAuthentication
@@ -292,22 +366,13 @@ func processLDAPAuthentication(key ssh.PublicKey, pass []byte, user string) (per
 
 	// Set the newly generated credentials, policyName is empty on purpose
 	// LDAP policies are applied automatically using their ldapUser, ldapGroups
-	// mapping.
-	updatedAt, err := globalIAMSys.SetTempUser(context.Background(), cred.AccessKey, cred, "")
-	if err != nil {
+	// mapping. For public-key auth, defer this commit until the signature is
+	// verified (V5-057); otherwise commit now.
+	if viaKey && c != nil {
+		stashPendingLDAPCred(string(c.SessionID()), cred)
+	} else if err := commitLDAPTempUser(cred); err != nil {
 		return nil, err
 	}
-
-	replLogIf(context.Background(), globalSiteReplicationSys.IAMChangeHook(context.Background(), madmin.SRIAMItem{
-		Type: madmin.SRIAMItemSTSAcc,
-		STSCredential: &madmin.SRSTSCredential{
-			AccessKey:    cred.AccessKey,
-			SecretKey:    cred.SecretKey,
-			SessionToken: cred.SessionToken,
-			ParentUser:   cred.ParentUser,
-		},
-		UpdatedAt: updatedAt,
-	}))
 
 	return &ssh.Permissions{
 		CriticalOptions: map[string]string{
@@ -480,8 +545,9 @@ func startSFTPServer(args []string) {
 			Ciphers:      allowCiphers,
 			MACs:         allowMACs,
 		},
-		PublicKeyAuthAlgorithms: allowPubKeys,
-		PublicKeyCallback:       sshPubKeyAuth,
+		PublicKeyAuthAlgorithms:   allowPubKeys,
+		PublicKeyCallback:         sshPubKeyAuth,
+		VerifiedPublicKeyCallback: sshVerifiedPubKeyAuth,
 	}
 
 	if !disablePassAuth {

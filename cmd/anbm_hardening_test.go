@@ -16,8 +16,10 @@ import (
 	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/minio/minio/internal/auth"
 	xhttp "github.com/minio/minio/internal/http"
@@ -331,5 +333,101 @@ func TestANBMResponseOverrideOnlyWhenSigned(t *testing.T) {
 	setHeadGetRespHeaders(ws, signed)
 	if got := ws.Header().Get(xhttp.ContentType); got != "text/html" {
 		t.Fatalf("ANBM-V4-033: signed response-content-type not honored: %q", got)
+	}
+}
+
+// ANBM-V5-040: a batch job ID that escapes the batch-jobs prefix (path
+// traversal) must be rejected before it is joined into an object path, while
+// every server-generated ID is accepted.
+func TestANBMBatchJobIDRejectsTraversal(t *testing.T) {
+	for _, ok := range []string{
+		"replicate-abc123:0",
+		"keyrotate-abc123:1",
+		"expire-aBc9:-1", // single-node proxy index is -1
+	} {
+		if err := validateBatchJobID(ok); err != nil {
+			t.Fatalf("ANBM-V5-040: rejected a legit job ID %q: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{
+		"",
+		"../config/iam",
+		"replicate-../config",
+		"expire-a:0/../../buckets",
+		"replicate-a\\b:0",
+		"evil-abc:0",         // unknown job type
+		"replicate-ab!cd:0",  // non-alnum uuid
+		"replicate-abc:",     // missing index
+		"replicate-abc",      // missing separator+index
+		"../buckets",
+	} {
+		if err := validateBatchJobID(bad); err == nil {
+			t.Fatalf("ANBM-V5-040: accepted an unsafe job ID %q", bad)
+		}
+	}
+}
+
+// ANBM-V5-041: a batch job must not accept a reserved/meta bucket as source or
+// target, so it cannot read or overwrite .minio.sys (IAM/config).
+func TestANBMBatchJobRejectsReservedBucket(t *testing.T) {
+	for _, bad := range []string{"", minioMetaBucket, minioMetaBucket + "/config", minioReservedBucket} {
+		if err := batchValidateBucket(bad); err == nil {
+			t.Fatalf("ANBM-V5-041: accepted reserved/meta bucket %q", bad)
+		}
+	}
+	if err := batchValidateBucket("user-bucket"); err != nil {
+		t.Fatalf("ANBM-V5-041: rejected a normal bucket: %v", err)
+	}
+}
+
+// ANBM-V5-046: the LDAP STS rate-limiter must bound both the size of each map
+// key and the number of entries, so an anonymous caller cannot amplify a large
+// form field into unbounded heap.
+func TestANBMSTSLimiterKeyAndEntriesBounded(t *testing.T) {
+	if got := boundLimiterKey("short"); got != "short" {
+		t.Fatalf("ANBM-V5-046: short key altered: %q", got)
+	}
+	big := strings.Repeat("a", 10<<20)
+	if got := boundLimiterKey(big); len(got) > stsLDAPLoginMaxKeyLen {
+		t.Fatalf("ANBM-V5-046: oversized key not bounded: len=%d", len(got))
+	}
+	if boundLimiterKey(strings.Repeat("a", 1<<16)) == boundLimiterKey(strings.Repeat("b", 1<<16)) {
+		t.Fatalf("ANBM-V5-046: distinct oversized keys collapsed to one key")
+	}
+
+	set := newSTSLDAPLoginKeyLimiterSet(time.Minute, stsLDAPLoginBurst, stsLDAPLoginEntryTTL)
+	now := UTCNow()
+	for i := 0; i < stsLDAPLoginMaxEntries+500; i++ {
+		set.Allow(now, "user-"+strconv.Itoa(i))
+	}
+	set.mu.Lock()
+	n := len(set.entries)
+	set.mu.Unlock()
+	if n > stsLDAPLoginMaxEntries {
+		t.Fatalf("ANBM-V5-046: limiter map grew past cap: %d > %d", n, stsLDAPLoginMaxEntries)
+	}
+}
+
+// ANBM-V5-053: describe-job must redact every secret in a job definition
+// (source and target credentials, notification tokens, key-rotation key).
+func TestANBMBatchJobRedactsAllSecrets(t *testing.T) {
+	r := &BatchJobReplicateV1{}
+	r.Source.Creds.SecretKey = "src-secret"
+	r.Source.Creds.SessionToken = "src-token"
+	r.Target.Creds.SecretKey = "tgt-secret"
+	r.Flags.Notify.Token = "notify-token"
+	r.RedactSensitive()
+	for _, got := range []string{r.Source.Creds.SecretKey, r.Source.Creds.SessionToken, r.Target.Creds.SecretKey, r.Flags.Notify.Token} {
+		if got != redactedText {
+			t.Fatalf("ANBM-V5-053: replicate secret not redacted: %q", got)
+		}
+	}
+
+	kr := &BatchJobKeyRotateV1{}
+	kr.Encryption.Key = "sse-c-key"
+	kr.Flags.Notify.Token = "kr-token"
+	kr.RedactSensitive()
+	if kr.Encryption.Key != redactedText || kr.Flags.Notify.Token != redactedText {
+		t.Fatalf("ANBM-V5-053: keyrotate secret not redacted")
 	}
 }

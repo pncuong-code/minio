@@ -43,6 +43,14 @@ import (
 // Set to 100MiB to prevent hostile DOS attacks.
 const ftpMaxWriteOffset = 100 << 20
 
+// V5-052: cap the total bytes and the number of out-of-order chunks buffered
+// per upload, so a client that never advances nextOffset cannot grow the
+// reorder buffer without bound (OOM).
+const (
+	ftpMaxWriteBuffer        = 100 << 20
+	ftpMaxWriteBufferEntries = 100000
+)
+
 type sftpDriver struct {
 	permissions *ssh.Permissions
 	endpoint    string
@@ -208,12 +216,19 @@ type writerAt struct {
 	err    error
 
 	nextOffset int64
+	buffered   int64
 	m          sync.Mutex
 }
 
 func (w *writerAt) WriteAt(b []byte, offset int64) (n int, err error) {
 	w.m.Lock()
 	defer w.m.Unlock()
+
+	// V5-052: reject negative offsets and writes into an already-flushed region;
+	// such chunks can never be drained and would accumulate in the buffer.
+	if offset < w.nextOffset {
+		return 0, fmt.Errorf("invalid write offset %d (next offset %d)", offset, w.nextOffset)
+	}
 
 	if w.nextOffset == offset {
 		n, err = w.w.Write(b)
@@ -222,6 +237,16 @@ func (w *writerAt) WriteAt(b []byte, offset int64) (n int, err error) {
 		if offset > w.nextOffset+ftpMaxWriteOffset {
 			return 0, fmt.Errorf("write offset %d is too far ahead of next offset %d", offset, w.nextOffset)
 		}
+		prev := int64(len(w.buffer[offset]))
+		if _, exists := w.buffer[offset]; !exists {
+			if len(w.buffer) >= ftpMaxWriteBufferEntries {
+				return 0, fmt.Errorf("too many pending out-of-order writes")
+			}
+		}
+		if w.buffered-prev+int64(len(b)) > ftpMaxWriteBuffer {
+			return 0, fmt.Errorf("pending out-of-order write buffer is full")
+		}
+		w.buffered += int64(len(b)) - prev
 		w.buffer[offset] = make([]byte, len(b))
 		copy(w.buffer[offset], b)
 		n = len(b)
@@ -231,6 +256,7 @@ again:
 	nextOut, ok := w.buffer[w.nextOffset]
 	if ok {
 		n, err = w.w.Write(nextOut)
+		w.buffered -= int64(len(nextOut))
 		delete(w.buffer, w.nextOffset)
 		w.nextOffset += int64(n)
 		if n != len(nextOut) {
@@ -325,6 +351,11 @@ func (f *sftpDriver) Filecmd(r *sftp.Request) (err error) {
 			// if all objects are not deleted yet this call may fail.
 			return clnt.RemoveBucket(cctx, bucket)
 		}
+
+		// V5-068: a directory removal must match only this directory's contents,
+		// not sibling keys that merely share the name as a prefix (e.g.
+		// "dir2/...", "dir.txt"). Ensure a trailing slash before listing.
+		prefix = retainSlash(prefix)
 
 		objectsCh := make(chan minio.ObjectInfo)
 

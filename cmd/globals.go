@@ -113,6 +113,14 @@ const (
 	// Maximum size of default bucket encryption configuration allowed
 	maxBucketSSEConfigSize = 1 * humanize.MiByte
 
+	// Maximum size of a bucket lifecycle configuration XML document. The
+	// client-declared Content-Length is not trusted as a decode bound, so this
+	// caps the body to prevent unbounded-memory decode (OOM).
+	maxBucketLifecycleConfigSize = 20 * humanize.MiByte
+
+	// Maximum size of a bucket tagging configuration XML document.
+	maxBucketTaggingConfigSize = 1 * humanize.MiByte
+
 	// diskFillFraction is the fraction of a disk we allow to be filled.
 	diskFillFraction = 0.99
 

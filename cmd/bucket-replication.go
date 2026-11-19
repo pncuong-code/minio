@@ -113,6 +113,13 @@ func validateReplicationDestination(ctx context.Context, bucket string, rCfg *re
 		if arn.Type != madmin.ReplicationService {
 			return sameTarget, toAPIError(ctx, BucketRemoteArnTypeInvalid{Bucket: bucket})
 		}
+		// V5-061: the ARN must be a remote target configured for THIS bucket.
+		// GetRemoteTargetClient resolves ARNs from a cluster-wide map, so without
+		// this check a bucket owner who learns another bucket's target ARN could
+		// replicate into that target.
+		if globalBucketTargetSys.GetRemoteBucketTargetByArn(ctx, bucket, arnStr).Arn == "" {
+			return sameTarget, toAPIError(ctx, BucketRemoteTargetNotFound{Bucket: bucket})
+		}
 		clnt := globalBucketTargetSys.GetRemoteTargetClient(bucket, arnStr)
 		if clnt == nil {
 			return sameTarget, toAPIError(ctx, BucketRemoteTargetNotFound{Bucket: bucket})

@@ -271,7 +271,12 @@ func checkPutObjectLockAllowed(ctx context.Context, rq *http.Request, bucket, ob
 
 	replica := rq.Header.Get(xhttp.AmzBucketReplicationStatus) == replication.Replica.String()
 
-	if opts.VersionID != "" && !replica {
+	// Enforce object-lock on an in-place overwrite of an existing version
+	// regardless of the replica header: a forged
+	// "X-Amz-Bucket-Replication-Status: REPLICA" must not skip this. A genuinely
+	// new replicated version is absent here (getObjectInfoFn returns not-found)
+	// so legitimate replication is unaffected.
+	if opts.VersionID != "" {
 		if objInfo, err := getObjectInfoFn(ctx, bucket, object, opts); err == nil {
 			r := objectlock.GetObjectRetentionMeta(objInfo.UserDefined)
 			t, err := objectlock.UTCNowNTP()
@@ -281,6 +286,15 @@ func checkPutObjectLockAllowed(ctx context.Context, rq *http.Request, bucket, ob
 			}
 			if r.Mode == objectlock.RetCompliance && r.RetainUntilDate.After(t) {
 				return mode, retainDate, legalHold, ErrObjectLocked
+			}
+			// Governance-locked versions may only be overwritten with the explicit
+			// bypass header AND the s3:BypassGovernanceRetention permission; without
+			// both, block the in-place overwrite.
+			if r.Mode == objectlock.RetGovernance && r.RetainUntilDate.After(t) {
+				byPassSet := objectlock.IsObjectLockGovernanceBypassSet(rq.Header)
+				if !byPassSet || checkRequestAuthType(ctx, rq, policy.BypassGovernanceRetentionAction, bucket, object) != ErrNone {
+					return mode, retainDate, legalHold, ErrObjectLocked
+				}
 			}
 			mode = r.Mode
 			retainDate = r.RetainUntilDate
