@@ -336,9 +336,8 @@ func TestANBMResponseOverrideOnlyWhenSigned(t *testing.T) {
 	}
 }
 
-// ANBM-V5-040: a batch job ID that escapes the batch-jobs prefix (path
-// traversal) must be rejected before it is joined into an object path, while
-// every server-generated ID is accepted.
+// A caller-supplied batch job ID must be rejected unless it matches the
+// server-generated format; every server-generated ID is accepted.
 func TestANBMBatchJobIDRejectsTraversal(t *testing.T) {
 	for _, ok := range []string{
 		"replicate-abc123:0",
@@ -346,7 +345,7 @@ func TestANBMBatchJobIDRejectsTraversal(t *testing.T) {
 		"expire-aBc9:-1", // single-node proxy index is -1
 	} {
 		if err := validateBatchJobID(ok); err != nil {
-			t.Fatalf("ANBM-V5-040: rejected a legit job ID %q: %v", ok, err)
+			t.Fatalf("rejected a legit job ID %q: %v", ok, err)
 		}
 	}
 	for _, bad := range []string{
@@ -362,37 +361,35 @@ func TestANBMBatchJobIDRejectsTraversal(t *testing.T) {
 		"../buckets",
 	} {
 		if err := validateBatchJobID(bad); err == nil {
-			t.Fatalf("ANBM-V5-040: accepted an unsafe job ID %q", bad)
+			t.Fatalf("accepted an unsafe job ID %q", bad)
 		}
 	}
 }
 
-// ANBM-V5-041: a batch job must not accept a reserved/meta bucket as source or
-// target, so it cannot read or overwrite .minio.sys (IAM/config).
+// A batch job must not accept a meta/reserved bucket as source or target.
 func TestANBMBatchJobRejectsReservedBucket(t *testing.T) {
 	for _, bad := range []string{"", minioMetaBucket, minioMetaBucket + "/config", minioReservedBucket} {
 		if err := batchValidateBucket(bad); err == nil {
-			t.Fatalf("ANBM-V5-041: accepted reserved/meta bucket %q", bad)
+			t.Fatalf("accepted reserved/meta bucket %q", bad)
 		}
 	}
 	if err := batchValidateBucket("user-bucket"); err != nil {
-		t.Fatalf("ANBM-V5-041: rejected a normal bucket: %v", err)
+		t.Fatalf("rejected a normal bucket: %v", err)
 	}
 }
 
-// ANBM-V5-046: the LDAP STS rate-limiter must bound both the size of each map
-// key and the number of entries, so an anonymous caller cannot amplify a large
-// form field into unbounded heap.
+// The LDAP STS rate-limiter must bound both the size of each map key and the
+// number of entries, so the map's memory stays bounded.
 func TestANBMSTSLimiterKeyAndEntriesBounded(t *testing.T) {
 	if got := boundLimiterKey("short"); got != "short" {
-		t.Fatalf("ANBM-V5-046: short key altered: %q", got)
+		t.Fatalf("short key altered: %q", got)
 	}
 	big := strings.Repeat("a", 10<<20)
 	if got := boundLimiterKey(big); len(got) > stsLDAPLoginMaxKeyLen {
-		t.Fatalf("ANBM-V5-046: oversized key not bounded: len=%d", len(got))
+		t.Fatalf("oversized key not bounded: len=%d", len(got))
 	}
 	if boundLimiterKey(strings.Repeat("a", 1<<16)) == boundLimiterKey(strings.Repeat("b", 1<<16)) {
-		t.Fatalf("ANBM-V5-046: distinct oversized keys collapsed to one key")
+		t.Fatalf("distinct oversized keys collapsed to one key")
 	}
 
 	set := newSTSLDAPLoginKeyLimiterSet(time.Minute, stsLDAPLoginBurst, stsLDAPLoginEntryTTL)
@@ -404,12 +401,12 @@ func TestANBMSTSLimiterKeyAndEntriesBounded(t *testing.T) {
 	n := len(set.entries)
 	set.mu.Unlock()
 	if n > stsLDAPLoginMaxEntries {
-		t.Fatalf("ANBM-V5-046: limiter map grew past cap: %d > %d", n, stsLDAPLoginMaxEntries)
+		t.Fatalf("limiter map grew past cap: %d > %d", n, stsLDAPLoginMaxEntries)
 	}
 }
 
-// ANBM-V5-053: describe-job must redact every secret in a job definition
-// (source and target credentials, notification tokens, key-rotation key).
+// RedactSensitive must redact every secret in a job definition (source and
+// target credentials, notification tokens, key-rotation key).
 func TestANBMBatchJobRedactsAllSecrets(t *testing.T) {
 	r := &BatchJobReplicateV1{}
 	r.Source.Creds.SecretKey = "src-secret"
@@ -419,7 +416,7 @@ func TestANBMBatchJobRedactsAllSecrets(t *testing.T) {
 	r.RedactSensitive()
 	for _, got := range []string{r.Source.Creds.SecretKey, r.Source.Creds.SessionToken, r.Target.Creds.SecretKey, r.Flags.Notify.Token} {
 		if got != redactedText {
-			t.Fatalf("ANBM-V5-053: replicate secret not redacted: %q", got)
+			t.Fatalf("replicate secret not redacted: %q", got)
 		}
 	}
 
@@ -428,6 +425,6 @@ func TestANBMBatchJobRedactsAllSecrets(t *testing.T) {
 	kr.Flags.Notify.Token = "kr-token"
 	kr.RedactSensitive()
 	if kr.Encryption.Key != redactedText || kr.Flags.Notify.Token != redactedText {
-		t.Fatalf("ANBM-V5-053: keyrotate secret not redacted")
+		t.Fatalf("keyrotate secret not redacted")
 	}
 }

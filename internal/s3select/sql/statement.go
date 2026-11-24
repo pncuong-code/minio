@@ -54,7 +54,7 @@ type SelectStatement struct {
 // and analyzes it.
 // maxSelectExpressionSize bounds the SQL expression, matching the Amazon S3
 // Select limit. It also keeps a deeply-nested expression from driving unbounded
-// parser recursion into a fatal, unrecoverable stack overflow (V5-060).
+// parser recursion.
 const maxSelectExpressionSize = 256 << 10
 
 func ParseSelectStatement(s string) (stmt SelectStatement, err error) {

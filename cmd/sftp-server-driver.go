@@ -43,9 +43,9 @@ import (
 // Set to 100MiB to prevent hostile DOS attacks.
 const ftpMaxWriteOffset = 100 << 20
 
-// V5-052: cap the total bytes and the number of out-of-order chunks buffered
-// per upload, so a client that never advances nextOffset cannot grow the
-// reorder buffer without bound (OOM).
+// Cap the total bytes and the number of out-of-order chunks buffered per
+// upload, so the reorder buffer stays bounded when a client does not advance
+// nextOffset.
 const (
 	ftpMaxWriteBuffer        = 100 << 20
 	ftpMaxWriteBufferEntries = 100000
@@ -224,8 +224,8 @@ func (w *writerAt) WriteAt(b []byte, offset int64) (n int, err error) {
 	w.m.Lock()
 	defer w.m.Unlock()
 
-	// V5-052: reject negative offsets and writes into an already-flushed region;
-	// such chunks can never be drained and would accumulate in the buffer.
+	// Reject negative offsets and writes into an already-flushed region; such
+	// chunks can never be drained and would accumulate in the buffer.
 	if offset < w.nextOffset {
 		return 0, fmt.Errorf("invalid write offset %d (next offset %d)", offset, w.nextOffset)
 	}
@@ -352,9 +352,9 @@ func (f *sftpDriver) Filecmd(r *sftp.Request) (err error) {
 			return clnt.RemoveBucket(cctx, bucket)
 		}
 
-		// V5-068: a directory removal must match only this directory's contents,
-		// not sibling keys that merely share the name as a prefix (e.g.
-		// "dir2/...", "dir.txt"). Ensure a trailing slash before listing.
+		// A directory removal must match only this directory's contents, not
+		// sibling keys that merely share the name as a prefix (e.g. "dir2/...",
+		// "dir.txt"), so ensure a trailing slash before listing.
 		prefix = retainSlash(prefix)
 
 		objectsCh := make(chan minio.ObjectInfo)

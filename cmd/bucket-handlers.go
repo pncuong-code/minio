@@ -463,9 +463,9 @@ func (api objectAPIHandlers) DeleteMultipleObjectsHandler(w http.ResponseWriter,
 	// Make sure to update context to print ObjectNames for multi objects.
 	ctx = updateReqContext(ctx, objects...)
 
-	// V5-049: this handler does not load each object's real tags, so a
-	// client-supplied X-Amz-Tagging header must not survive into the per-object
-	// authz checks where it would be read as s3:ExistingObjectTag.
+	// This handler does not load each object's real tags, so drop any
+	// client-supplied X-Amz-Tagging before the per-object authorization checks:
+	// tag-based policy conditions must use stored tags only.
 	r.Header.Del(xhttp.AmzObjectTagging)
 
 	// Call checkRequestAuthType to populate ReqInfo.AccessKey before GetBucketInfo()
@@ -767,8 +767,7 @@ func (api objectAPIHandlers) PutBucketHandler(w http.ResponseWriter, r *http.Req
 	}
 
 	// force-create is an internal/admin affordance (site replication, admin
-	// bucket import) that overwrites an existing bucket. It must not be driven
-	// by an ordinary s3:CreateBucket principal over the S3 header, so honor it
+	// bucket import), not an ordinary S3 client option, so honor the header
 	// only for the account owner.
 	forceCreate = forceCreate && owner
 

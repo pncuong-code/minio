@@ -349,7 +349,7 @@ func TestJWTRetryStillRejectsHMACType(t *testing.T) {
 	if !strings.Contains(err.Error(), "signing method HS256 is invalid") {
 		t.Fatalf("expected retry failure to come from ValidMethods, got: %v", err)
 	}
-	// V5-059: the kid is already known, so the failure (an invalid signing
+	// the kid is already known, so the failure (an invalid signing
 	// method, not an unknown kid) must NOT trigger a wasteful JWKS refresh.
 	if hits.Load() != 0 {
 		t.Fatalf("expected no JWKS refresh for a known kid, got %d requests", hits.Load())

@@ -522,7 +522,7 @@ func (a adminAPIHandlers) ListAccessKeysLDAPBulk(w http.ResponseWriter, r *http.
 	} else if len(dnList) == 1 {
 		var dn string
 		foundResult, err := globalIAMSys.LDAPConfig.GetValidatedDNForUsername(dnList[0])
-		if err == nil && foundResult != nil { // V5-064: result may be (nil, nil)
+		if err == nil && foundResult != nil { // result may be (nil, nil)
 			dn = foundResult.NormDN
 		}
 		if dn == cred.ParentUser || dnList[0] == cred.ParentUser {

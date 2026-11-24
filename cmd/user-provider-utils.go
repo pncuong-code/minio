@@ -51,8 +51,8 @@ func getUserWithProvider(ctx context.Context, userProvider, user string, validat
 			if !globalIAMSys.LDAPConfig.ParsesAsDN(user) {
 				return "", errNoSuchUser
 			}
-			// V5-064: no validated result (res is nil) but the user string is
-			// itself a DN; use it directly instead of dereferencing res.
+			// No validated result (res is nil) but the user string is itself a
+			// DN; use it directly instead of dereferencing res.
 			return user, nil
 		}
 		return res.NormDN, nil

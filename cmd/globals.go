@@ -114,8 +114,8 @@ const (
 	maxBucketSSEConfigSize = 1 * humanize.MiByte
 
 	// Maximum size of a bucket lifecycle configuration XML document. The
-	// client-declared Content-Length is not trusted as a decode bound, so this
-	// caps the body to prevent unbounded-memory decode (OOM).
+	// client-declared Content-Length is not used as a decode bound; this caps
+	// the body independently.
 	maxBucketLifecycleConfigSize = 20 * humanize.MiByte
 
 	// Maximum size of a bucket tagging configuration XML document.

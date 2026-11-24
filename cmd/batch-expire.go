@@ -320,7 +320,7 @@ func (r BatchJobExpire) Notify(ctx context.Context, body io.Reader) error {
 		return nil
 	}
 
-	// V5-056: only http/https, and never follow redirects.
+	// Only http/https, and never follow redirects for the notification request.
 	if u, perr := url.Parse(r.NotificationCfg.Endpoint); perr != nil || (u.Scheme != "http" && u.Scheme != "https") {
 		return fmt.Errorf("invalid batch job notification endpoint")
 	}
@@ -440,16 +440,16 @@ func batchObjsForDelete(ctx context.Context, r *BatchJobExpire, ri *batchJobInfo
 			oiCache := newObjInfoCache()
 
 			// Honor object lock: a batch expire job reaches the object layer
-			// directly and would otherwise purge versions under active retention
-			// or legal hold. Mirror lifecycle/ILM, which skips locked versions.
+			// directly, so mirror lifecycle/ILM and skip versions under active
+			// retention or legal hold.
 			rcfg, _ := globalBucketObjectLockSys.Get(r.Bucket)
 
 			for _, exp := range toExpire {
 				if rcfg.LockEnabled {
 					if exp.ExpireAll {
 						// A prefix delete of every version of an object cannot be
-						// made safe on a lock-enabled bucket; record as not
-						// deleted and skip rather than purge locked versions.
+						// made safe on a lock-enabled bucket; record it as not
+						// deleted and skip it.
 						batchLogIf(ctx, fmt.Errorf("skipping expire of all versions of %s/%s: bucket has object lock enabled", r.Bucket, exp.Name))
 						ri.trackMultipleObjectVersions(exp, false)
 						continue

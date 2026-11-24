@@ -2675,10 +2675,9 @@ func (api objectAPIHandlers) DeleteObjectHandler(w http.ResponseWriter, r *http.
 		return
 	}
 
-	// V5-049: this handler does not load the object's real tags, so a
-	// client-supplied X-Amz-Tagging header must not survive into the authz
-	// check where it would be read as s3:ExistingObjectTag and satisfy a
-	// tag-based policy condition.
+	// This handler does not load the object's real tags, so drop any
+	// client-supplied X-Amz-Tagging before authorization: tag-based policy
+	// conditions must be evaluated against stored tags only.
 	r.Header.Del(xhttp.AmzObjectTagging)
 
 	// Pass the versionId so authorizeRequest can enforce a Deny on
@@ -2750,12 +2749,10 @@ func (api objectAPIHandlers) DeleteObjectHandler(w http.ResponseWriter, r *http.
 	vID := opts.VersionID
 	if replica {
 		opts.SetReplicaStatus(replication.Replica)
-		// Do NOT clear vID on the replica path: a forged
-		// "X-Amz-Bucket-Replication-Status: REPLICA" header must not skip
-		// retention enforcement and purge an object-locked version.
-		// enforceRetentionBypassForDelete tolerates a delete-marker version that
-		// is not yet on disk (handled as object-not-found / method-not-allowed),
-		// so legitimate delete-marker replication is unaffected.
+		// Keep the concrete version ID so object-lock retention is evaluated on
+		// the replica path too. enforceRetentionBypassForDelete tolerates a
+		// delete-marker version that is not yet on disk (object-not-found /
+		// method-not-allowed), so delete-marker replication is unaffected.
 	}
 	opts.SetEvalRetentionBypassFn(func(goi ObjectInfo, gerr error) (err error) {
 		err = nil
@@ -2876,7 +2873,7 @@ func (api objectAPIHandlers) PutObjectLegalHoldHandler(w http.ResponseWriter, r 
 		return
 	}
 
-	// V5-049: drop any client X-Amz-Tagging so it cannot forge s3:ExistingObjectTag.
+	// Evaluate tag-based policy conditions against stored tags only: drop any client X-Amz-Tagging.
 	r.Header.Del(xhttp.AmzObjectTagging)
 
 	// Check permissions to perform this legal hold operation
@@ -2973,7 +2970,7 @@ func (api objectAPIHandlers) GetObjectLegalHoldHandler(w http.ResponseWriter, r 
 		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(ErrServerNotInitialized), r.URL)
 		return
 	}
-	// V5-049: drop any client X-Amz-Tagging so it cannot forge s3:ExistingObjectTag.
+	// Evaluate tag-based policy conditions against stored tags only: drop any client X-Amz-Tagging.
 	r.Header.Del(xhttp.AmzObjectTagging)
 	if s3Error := checkRequestAuthType(ctx, r, policy.GetObjectLegalHoldAction, bucket, object); s3Error != ErrNone {
 		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(s3Error), r.URL)
@@ -3038,8 +3035,8 @@ func (api objectAPIHandlers) PutObjectRetentionHandler(w http.ResponseWriter, r 
 		return
 	}
 
-	// V5-049: drop any client X-Amz-Tagging so it cannot forge
-	// s3:ExistingObjectTag in the condition-aware authz performed below.
+	// Drop any client X-Amz-Tagging so the condition-aware authorization below
+	// evaluates tag conditions against stored tags only.
 	r.Header.Del(xhttp.AmzObjectTagging)
 
 	// Check permissions to perform this object retention operation.
@@ -3155,7 +3152,7 @@ func (api objectAPIHandlers) GetObjectRetentionHandler(w http.ResponseWriter, r 
 		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(ErrServerNotInitialized), r.URL)
 		return
 	}
-	// V5-049: drop any client X-Amz-Tagging so it cannot forge s3:ExistingObjectTag.
+	// Evaluate tag-based policy conditions against stored tags only: drop any client X-Amz-Tagging.
 	r.Header.Del(xhttp.AmzObjectTagging)
 	if s3Error := checkRequestAuthType(ctx, r, policy.GetObjectRetentionAction, bucket, object); s3Error != ErrNone {
 		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(s3Error), r.URL)
@@ -3264,9 +3261,9 @@ func (api objectAPIHandlers) GetObjectTaggingHandler(w http.ResponseWriter, r *h
 				ot = tags
 				w.Header()[xhttp.MinIOTaggingProxied] = []string{"true"} // indicate that the request was proxied.
 			} else {
-				// V5-066: authorize before revealing that the object/version
-				// does not exist, so an unauthorized caller cannot use the
-				// 404-vs-403 difference as an existence oracle.
+				// Authorize before returning a not-found result, so the
+				// response does not distinguish a missing object from an
+				// unauthorized one.
 				if s3Error := authorizeRequest(ctx, r, policy.GetObjectTaggingAction); s3Error != ErrNone {
 					writeErrorResponse(ctx, w, errorCodes.ToAPIErr(s3Error), r.URL)
 					return
@@ -3510,8 +3507,8 @@ func (api objectAPIHandlers) DeleteObjectTaggingHandler(w http.ResponseWriter, r
 				return
 			}
 		}
-		// V5-066: authorize before revealing that the object/version does not
-		// exist, so the 404-vs-403 difference is not an existence oracle.
+		// Authorize before returning a not-found result, so the response does
+		// not distinguish a missing object from an unauthorized one.
 		if s3Error := authorizeRequest(ctx, r, policy.DeleteObjectTaggingAction); s3Error != ErrNone {
 			writeErrorResponse(ctx, w, errorCodes.ToAPIErr(s3Error), r.URL)
 			return

@@ -201,9 +201,9 @@ func (api objectAPIHandlers) listObjectsV2Handler(ctx context.Context, w http.Re
 	)
 
 	if r.Header.Get(xMinIOExtract) == "true" && strings.Contains(prefix, archivePattern) {
-		// V5-067: listing inside an archive reads the object's central directory
-		// (and caches zip-index metadata onto the object), so require GetObject
-		// on the archive rather than only ListBucket.
+		// Listing inside an archive reads the object's content (central
+		// directory), so require GetObject on the archive rather than only
+		// ListBucket.
 		if zipPath, _, zerr := splitZipExtensionPath(prefix); zerr == nil {
 			if s3Error := checkRequestAuthType(ctx, r, policy.GetObjectAction, bucket, zipPath); s3Error != ErrNone {
 				writeErrorResponse(ctx, w, errorCodes.ToAPIErr(s3Error), r.URL)

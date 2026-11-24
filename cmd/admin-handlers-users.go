@@ -859,8 +859,8 @@ func (a adminAPIHandlers) UpdateServiceAccount(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	// A service account parented by the root account carries root-equivalent
-	// privileges; only the owner may modify it (e.g. reset its secret key).
+	// A service account parented by the root account inherits owner privileges,
+	// so only the owner may modify it.
 	if svcAccount.ParentUser == globalActiveCred.AccessKey && !owner {
 		writeErrorResponseJSON(ctx, w, errorCodes.ToAPIErr(ErrAccessDenied), r.URL)
 		return
@@ -2254,10 +2254,9 @@ func (a adminAPIHandlers) ExportIAM(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// V5-055: the export streams the secret key of every user and service
-	// account, and the madmin client receives the zip unencrypted. Refuse to
-	// ship it over a plaintext connection to a non-loopback peer; TLS is the
-	// only transport protection here.
+	// The export contains credentials and the client receives the zip
+	// unencrypted, so refuse to serve it over a plaintext connection to a
+	// non-loopback peer; TLS is the only transport protection here.
 	if !globalIsTLS {
 		if ip := net.ParseIP(handlers.GetSourceIP(r)); ip == nil || !ip.IsLoopback() {
 			writeErrorResponseJSON(ctx, w, errorCodes.ToAPIErr(ErrInsecureClientRequest), r.URL)
@@ -3001,10 +3000,8 @@ func commonAddServiceAccount(r *http.Request, ldap bool) (context.Context, auth.
 		return ctx, auth.Credentials{}, newServiceAccountOpts{}, madmin.AddServiceAccountReq{}, "", errorCodes.ToAPIErr(ErrAccessDenied)
 	}
 
-	// A service account whose parent is the root account inherits root
-	// (owner) privileges. Only the owner may create one; otherwise a principal
-	// holding admin:CreateServiceAccount could mint root-equivalent credentials
-	// for the root account (confused deputy / privilege escalation).
+	// A service account whose parent is the root account inherits owner
+	// privileges, so only the owner may create one for the root account.
 	if targetUser == globalActiveCred.AccessKey && !owner {
 		return ctx, auth.Credentials{}, newServiceAccountOpts{}, madmin.AddServiceAccountReq{}, "", errorCodes.ToAPIErr(ErrAccessDenied)
 	}

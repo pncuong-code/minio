@@ -122,8 +122,7 @@ func notifyEndpoint(ctx context.Context, ri *batchJobInfo, endpoint, token strin
 		return nil
 	}
 
-	// V5-056: only http/https, and never follow redirects, so a notification
-	// endpoint cannot bounce (302) the request to loopback/metadata services.
+	// Only http/https, and never follow redirects for the notification request.
 	if u, perr := url.Parse(endpoint); perr != nil || (u.Scheme != "http" && u.Scheme != "https") {
 		return fmt.Errorf("invalid batch job notification endpoint")
 	}
@@ -607,9 +606,9 @@ func toObjectInfo(bucket, object string, objInfo minio.ObjectInfo) ObjectInfo {
 
 	maps.Copy(oi.UserDefined, objInfo.UserMetadata)
 
-	// V5-063: the source is a remote cluster; reserved internal metadata
-	// (X-Minio-Internal-*) is normally stripped at the HTTP edge but this path
-	// writes straight to the object layer, so drop it here.
+	// The source is a remote cluster and this path writes straight to the
+	// object layer, so drop reserved internal metadata (X-Minio-Internal-*)
+	// that the HTTP edge would normally strip.
 	for k := range oi.UserDefined {
 		if strings.HasPrefix(k, ReservedMetadataPrefix) || strings.HasPrefix(k, ReservedMetadataPrefixLower) {
 			delete(oi.UserDefined, k)
@@ -817,9 +816,8 @@ func getJobPath(job BatchJobRequest) string {
 
 // batchValidateBucket rejects meta/reserved buckets as a batch job source or
 // target. Batch workers run with server privileges and reach the object layer
-// directly, bypassing the reserved-bucket guard enforced at the HTTP edge, so
-// each job definition must reject these buckets itself (otherwise a job can read
-// or overwrite .minio.sys IAM/config).
+// directly, so each job definition validates the bucket itself rather than
+// relying on the reserved-bucket check at the HTTP edge.
 func batchValidateBucket(bucket string) error {
 	if bucket == "" || isMinioMetaBucketName(bucket) || isMinioReservedBucket(bucket) {
 		return errInvalidArgument
@@ -827,17 +825,16 @@ func batchValidateBucket(bucket string) error {
 	return nil
 }
 
-// validateBatchJobID rejects a caller-supplied batch job ID that does not match
-// the server-generated format "<type>-<id><sep><index>". It is the single guard
-// that keeps a caller-controlled ID from escaping the batch-jobs prefix (e.g.
-// "../config/iam") before it is joined into an object path and used with a
-// recursive delete. The traversal rejection alone closes the escape; the format
-// check is defense in depth, and must accept every ID the generator produces.
+// validateBatchJobID accepts only a caller-supplied batch job ID that matches
+// the server-generated format "<type>-<id><sep><index>", so the value is safe
+// to join into an object path. The separator/dot-segment rejection is the
+// primary guard; the format check is defense in depth and must accept every ID
+// the generator produces.
 func validateBatchJobID(id string) error {
 	if id == "" {
 		return errInvalidArgument
 	}
-	// No path separators or traversal on any platform.
+	// Reject path separators and dot-segments on any platform.
 	if strings.ContainsAny(id, `/\`) || strings.Contains(id, "..") {
 		return errInvalidArgument
 	}
@@ -1898,11 +1895,9 @@ func (a adminAPIHandlers) StartBatchJob(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// V5-051: admin rights to start a batch job do not substitute for the
-	// object-level S3 permission the job exercises with server privileges.
-	// Require a non-owner initiator to hold the matching S3 action on the local
-	// bucket, so a delegated admin cannot replicate/expire/rotate a bucket they
-	// have no S3 rights to.
+	// A batch job runs with server privileges, so require a non-owner initiator
+	// to also hold the matching object-level S3 permission on the local bucket
+	// that the job operates on. The owner is exempt.
 	if creds.AccessKey != globalActiveCred.AccessKey && creds.ParentUser != globalActiveCred.AccessKey {
 		cond := getConditionValues(r, "", creds)
 		allowS3 := func(action policy.Action, bucket string) bool {

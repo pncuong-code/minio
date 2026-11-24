@@ -884,9 +884,9 @@ func (z *erasureServerPools) MakeBucket(ctx context.Context, bucket string, opts
 
 	// A ForceCreate request swallows errVolumeExists at the peer layer, so
 	// reaching here does not imply the bucket is new. If it already has
-	// persisted metadata, preserve it: overwriting with a blank metadata would
-	// silently drop the bucket policy, object-lock/WORM config, versioning,
-	// lifecycle, replication and encryption settings.
+	// persisted metadata, preserve it rather than replacing it with blank
+	// metadata (which would reset the bucket's policy, object-lock, versioning,
+	// lifecycle, replication and encryption configuration).
 	if opts.ForceCreate {
 		if _, err := readBucketMetadata(ctx, z, bucket); err == nil {
 			return nil

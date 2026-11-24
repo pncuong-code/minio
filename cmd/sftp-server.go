@@ -135,12 +135,12 @@ func sshPasswordAuth(c ssh.ConnMetadata, pass []byte) (*ssh.Permissions, error) 
 	return authenticateSSHConnection(c, nil, pass)
 }
 
-// V5-057: for public-key based LDAP auth, the temporary credential must be
-// committed (stored in IAM + broadcast to site replication) only AFTER the
-// client proves possession of the private key. PublicKeyCallback runs during
-// the (unverified) key-query phase, so the commit is deferred to
-// VerifiedPublicKeyCallback. The pending credential is stashed per connection
-// session in the meantime.
+// For public-key based LDAP auth, the temporary credential is committed
+// (stored in IAM + broadcast to site replication) only after the client proves
+// possession of the private key. PublicKeyCallback runs during the key-query
+// phase (before verification), so the commit is deferred to
+// VerifiedPublicKeyCallback and the pending credential is stashed per
+// connection session in the meantime.
 const sftpMaxPendingLDAPCreds = 8192
 
 var sftpPendingLDAPCreds = struct {
@@ -367,7 +367,7 @@ func processLDAPAuthentication(c ssh.ConnMetadata, key ssh.PublicKey, pass []byt
 	// Set the newly generated credentials, policyName is empty on purpose
 	// LDAP policies are applied automatically using their ldapUser, ldapGroups
 	// mapping. For public-key auth, defer this commit until the signature is
-	// verified (V5-057); otherwise commit now.
+	// verified; otherwise commit now.
 	if viaKey && c != nil {
 		stashPendingLDAPCred(string(c.SessionID()), cred)
 	} else if err := commitLDAPTempUser(cred); err != nil {

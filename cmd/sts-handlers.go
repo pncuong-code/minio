@@ -101,9 +101,8 @@ const (
 	stsLDAPLoginRetryAfterSec = int((time.Minute / stsLDAPLoginBurst) / time.Second)
 
 	// Bound the per-key size and the number of entries each limiter map can
-	// hold. The map keys are caller-controlled (form field / source header) and
-	// otherwise unbounded, so these caps keep an unauthenticated caller from
-	// amplifying a large value into unbounded heap.
+	// hold. The map keys are caller-controlled (form field / source header), so
+	// these caps keep the map's memory bounded.
 	stsLDAPLoginMaxKeyLen  = 256
 	stsLDAPLoginMaxEntries = 4096
 )
@@ -317,9 +316,8 @@ func newSTSLDAPLoginKeyLimiterSet(refillEvery time.Duration, burst int, ttl time
 }
 
 // boundLimiterKey caps the memory a single rate-limiter map key can occupy.
-// Values longer than the cap are replaced by their fixed-size hash so a caller
-// cannot drive map growth with an oversized username or forged source header
-// while keeping distinct values on distinct keys.
+// A value longer than the cap is replaced by its fixed-size hash, keeping
+// distinct values on distinct keys while bounding per-key memory.
 func boundLimiterKey(s string) string {
 	if len(s) <= stsLDAPLoginMaxKeyLen {
 		return s
@@ -1064,10 +1062,9 @@ func (sts *stsAPIHandlers) AssumeRoleWithCertificate(w http.ResponseWriter, r *h
 		return
 	}
 
-	// V5-065: the CN maps directly to a policy name and MinIO treats a
-	// comma-separated value as a SET of policies, so a CN such as
-	// "user,consoleAdmin" would attach the second policy too. Reject any CN that
-	// could expand to more than one policy.
+	// The CN maps directly to a policy name and a comma-separated value is
+	// treated as a set of policies, so reject any CN that could expand to more
+	// than one policy.
 	if strings.ContainsAny(certificate.Subject.CommonName, ", \t") {
 		writeSTSErrorResponse(ctx, w, ErrSTSInvalidParameterValue, errors.New("certificate subject CN must not contain a comma or whitespace"))
 		return
